@@ -7,14 +7,15 @@ import (
 	"os"
 	"testing"
 
+	"github.com/open-policy-agent/opa/compile"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/aquasecurity/tracee/pkg/signatures/regosig"
 	"github.com/aquasecurity/tracee/signatures/signaturestest"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/protocol"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/open-policy-agent/opa/compile"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRegoSignature_GetMetadata(t *testing.T) {
@@ -347,7 +348,7 @@ func OnEventSpec(t *testing.T, target string, partial bool) {
 			require.NoError(t, err)
 
 			holder := &signaturestest.FindingsHolder{}
-			err = sig.Init(holder.OnFinding)
+			err = sig.Init(detect.SignatureContext{Callback: holder.OnFinding})
 			require.NoError(t, err)
 
 			event := tc.event
@@ -440,9 +441,9 @@ func BenchmarkSignature_OnEvent(b *testing.B) {
 			},
 			input: protocol.Event{
 				Payload: trace.Event{
-					EventName:   "sched_process_exec",
-					ArgsNum:     1,
-					ContainerID: "someContainer",
+					EventName: "sched_process_exec",
+					ArgsNum:   1,
+					Container: trace.Container{ID: "someContainer"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -486,7 +487,7 @@ func BenchmarkSignature_OnEvent(b *testing.B) {
 			signature, err := regosig.NewRegoSignature(compile.TargetRego, false, bm.regoCodes...)
 			require.NoError(b, err)
 			holder := &signaturestest.FindingsHolder{}
-			err = signature.Init(holder.OnFinding)
+			err = signature.Init(detect.SignatureContext{Callback: holder.OnFinding})
 			require.NoError(b, err)
 
 			b.ResetTimer()

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events"
-	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/trace"
 )
 
@@ -22,13 +22,22 @@ func NewArgFilter() *ArgFilter {
 }
 
 // GetEventFilters returns the argument filters map for a specific event
-// writing to the map may have unintentional consenquences, avoid doing so
+// writing to the map may have unintentional consequences, avoid doing so
 func (filter *ArgFilter) GetEventFilters(eventID events.ID) map[string]Filter {
 	return filter.filters[eventID]
 }
 
 func (filter *ArgFilter) Filter(eventID events.ID, args []trace.Argument) bool {
 	if !filter.Enabled() {
+		return true
+	}
+
+	// TODO: remove once events params are introduced
+	//       i.e. print_mem_dump.params.symbol_name=system:security_file_open
+	// events.PrintMemDump bypass was added due to issue #2546
+	// because it uses usermode applied filters as parameters for the event,
+	// which occurs after filtering
+	if eventID == events.PrintMemDump {
 		return true
 	}
 
@@ -43,11 +52,7 @@ func (filter *ArgFilter) Filter(eventID events.ID, args []trace.Argument) bool {
 			}
 		}
 		if !found {
-			// TODO: remove once events arguments are introduced
-			// filter if argument does not exist
-			// the events.PrintMemDump bypass was added due to issue #2546
-			// because it uses usermode applied filters as parameters for the event, which occurs after filtering
-			return eventID == events.PrintMemDump
+			return false
 		}
 		// TODO: use type assertion instead of string conversion
 		if argName != "syscall" {
@@ -111,7 +116,7 @@ func (filter *ArgFilter) Parse(filterName string, operatorAndValues string, even
 		return NewStringFilter()
 	})
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 
 	filter.Enable()
@@ -136,7 +141,7 @@ func (filter *ArgFilter) parseFilter(id events.ID, argName string, operatorAndVa
 	argFilter := filter.filters[id][argName]
 	err := argFilter.Parse(operatorAndValues)
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 
 	// store the arg filter again

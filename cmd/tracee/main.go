@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
 	"syscall"
+
+	cli "github.com/urfave/cli/v2"
 
 	"github.com/aquasecurity/tracee/pkg/cmd"
 	"github.com/aquasecurity/tracee/pkg/cmd/flags"
@@ -16,27 +19,7 @@ import (
 	"github.com/aquasecurity/tracee/pkg/signatures/engine"
 	"github.com/aquasecurity/tracee/pkg/signatures/signature"
 	"github.com/aquasecurity/tracee/types/detect"
-
-	cli "github.com/urfave/cli/v2"
 )
-
-func init() {
-	// Avoiding to override package-level logger
-	// when it's already set by logger environment variables
-	if !logger.IsSetFromEnv() {
-		// Logger Setup
-		logger.Init(
-			&logger.LoggerConfig{
-				Writer:    os.Stderr,
-				Level:     logger.InfoLevel,
-				Encoder:   logger.NewJSONEncoder(logger.NewProductionConfig().EncoderConfig),
-				Aggregate: false,
-			},
-		)
-	}
-
-	initialize.SetLibbpfgoCallbacks()
-}
 
 var version string
 
@@ -50,9 +33,15 @@ func main() {
 				return cli.ShowAppHelp(c) // no args, only flags supported
 			}
 
+			logger.Init(logger.NewDefaultLoggingConfig())
+
 			flags.PrintAndExitIfHelp(c, true)
 
 			// Rego command line flags
+
+			if c.StringSlice("policy") != nil && c.StringSlice("filter") != nil {
+				return errors.New("policy and filter flags cannot be used together")
+			}
 
 			rego, err := flags.PrepareRego(c.StringSlice("rego"))
 			if err != nil {
@@ -76,6 +65,8 @@ func main() {
 				cmd.PrintEventList(true) // list events
 				return nil
 			}
+
+			initialize.SetLibbpfgoCallbacks()
 
 			runner, err := urfave.GetTraceeRunner(c, version, true)
 			if err != nil {
@@ -103,7 +94,12 @@ func main() {
 				Name:    "list",
 				Aliases: []string{"l"},
 				Value:   false,
-				Usage:   "list tracable events",
+				Usage:   "list traceable events",
+			},
+			&cli.StringSliceFlag{
+				Name:    "policy",
+				Aliases: []string{"p"},
+				Usage:   "path to a policy or directory with policies",
 			},
 			&cli.StringSliceFlag{
 				Name:    "filter",
@@ -143,12 +139,12 @@ func main() {
 			&cli.IntFlag{
 				Name:    "perf-buffer-size",
 				Aliases: []string{"b"},
-				Value:   1024, // 4 MB of contigous pages
+				Value:   1024, // 4 MB of contiguous pages
 				Usage:   "size, in pages, of the internal perf ring buffer used to submit events from the kernel",
 			},
 			&cli.IntFlag{
 				Name:  "blob-perf-buffer-size",
-				Value: 1024, // 4 MB of contigous pages
+				Value: 1024, // 4 MB of contiguous pages
 				Usage: "size, in pages, of the internal perf ring buffer used to send blobs from the kernel",
 			},
 			&cli.StringFlag{
@@ -169,6 +165,11 @@ func main() {
 			&cli.BoolFlag{
 				Name:  server.PProfEndpointFlag,
 				Usage: "enable pprof endpoints",
+				Value: false,
+			},
+			&cli.BoolFlag{
+				Name:  server.PyroscopeAgentFlag,
+				Usage: "enable pyroscope agent",
 				Value: false,
 			},
 			&cli.StringFlag{
@@ -203,7 +204,7 @@ func main() {
 
 	err := app.Run(os.Args)
 	if err != nil {
-		logger.Fatal("app", "error", err)
+		logger.Fatalw("App", "error", err)
 	}
 }
 
@@ -213,13 +214,13 @@ func createEventsFromSignatures(startId events.ID, sigs []detect.Signature) {
 	for _, s := range sigs {
 		m, err := s.GetMetadata()
 		if err != nil {
-			logger.Error("failed to load event", "error", err)
+			logger.Errorw("Failed to load event", "error", err)
 			continue
 		}
 
 		selectedEvents, err := s.GetSelectedEvents()
 		if err != nil {
-			logger.Error("failed to load event", "error", err)
+			logger.Errorw("Failed to load event", "error", err)
 			continue
 		}
 
@@ -228,7 +229,7 @@ func createEventsFromSignatures(startId events.ID, sigs []detect.Signature) {
 		for _, s := range selectedEvents {
 			eventID, found := events.Definitions.GetID(s.Name)
 			if !found {
-				logger.Error("failed to load event dependency", "event", s.Name)
+				logger.Errorw("Failed to load event dependency", "event", s.Name)
 				continue
 			}
 
@@ -239,7 +240,7 @@ func createEventsFromSignatures(startId events.ID, sigs []detect.Signature) {
 
 		err = events.Definitions.Add(id, event)
 		if err != nil {
-			logger.Error("failed to add event definition", "error", err)
+			logger.Errorw("Failed to add event definition", "error", err)
 			continue
 		}
 

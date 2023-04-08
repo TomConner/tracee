@@ -8,13 +8,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/pkg/signatures/signature"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/protocol"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestEngine_ConsumeSources(t *testing.T) {
@@ -117,7 +118,7 @@ func TestEngine_ConsumeSources(t *testing.T) {
 				ProcessID:       2,
 				HostProcessID:   1002,
 				ParentProcessID: 1,
-				ContainerID:     "container ID",
+				Container:       trace.Container{ID: "container ID"},
 				ContextFlags:    trace.ContextFlags{ContainerStarted: true},
 				Args: []trace.Argument{
 					{
@@ -141,7 +142,7 @@ func TestEngine_ConsumeSources(t *testing.T) {
 			},
 			expectedNumEvents: 1,
 			expectedEvent: trace.Event{
-				ProcessID: 2, ParentProcessID: 1, HostProcessID: 1002, ContainerID: "container ID", ContextFlags: trace.ContextFlags{ContainerStarted: true}, Args: []trace.Argument{{ArgMeta: trace.ArgMeta{Name: "pathname", Type: ""}, Value: "/proc/self/mem"}},
+				ProcessID: 2, ParentProcessID: 1, HostProcessID: 1002, Container: trace.Container{ID: "container ID"}, ContextFlags: trace.ContextFlags{ContainerStarted: true}, Args: []trace.Argument{{ArgMeta: trace.ArgMeta{Name: "pathname", Type: ""}, Value: "/proc/self/mem"}},
 				EventName: "test_event",
 			},
 		},
@@ -152,7 +153,7 @@ func TestEngine_ConsumeSources(t *testing.T) {
 				ProcessID:       2,
 				HostProcessID:   1002,
 				ParentProcessID: 1,
-				ContainerID:     "container ID",
+				Container:       trace.Container{ID: "container ID"},
 				ContextFlags:    trace.ContextFlags{ContainerStarted: true},
 				Args: []trace.Argument{
 					{
@@ -221,12 +222,12 @@ func TestEngine_ConsumeSources(t *testing.T) {
 					}, nil
 				},
 			},
-			expectedError: "signature Fake Signature doesn't declare an input source",
+			expectedError: "Signature Fake Signature doesn't declare an input source",
 		},
 		{
 			name: "sad path - signature init fails",
 			inputSignature: signature.FakeSignature{
-				FakeInit: func(handler detect.SignatureHandler) error {
+				FakeInit: func(ctx detect.SignatureContext) error {
 					return errors.New("init failed")
 				},
 			},
@@ -312,16 +313,16 @@ func TestEngine_ConsumeSources(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var logBuf []byte
 		loggerBuf := bytes.NewBuffer(logBuf)
-		if !logger.IsSetFromEnv() {
-			logger.Init(
-				&logger.LoggerConfig{
-					Writer:    loggerBuf,
-					Level:     logger.InfoLevel,
-					Encoder:   logger.NewJSONEncoder(logger.NewProductionConfig().EncoderConfig),
-					Aggregate: false,
-				},
-			)
-		}
+		logger.Init(
+			logger.LoggingConfig{
+				Logger: logger.NewLogger(logger.LoggerConfig{
+					Writer:  loggerBuf,
+					Level:   logger.InfoLevel,
+					Encoder: logger.NewJSONEncoder(logger.NewProductionConfig().EncoderConfig),
+				}),
+				Aggregate: false,
+			},
+		)
 
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {

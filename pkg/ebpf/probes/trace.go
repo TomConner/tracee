@@ -4,7 +4,8 @@ import (
 	"strings"
 
 	bpf "github.com/aquasecurity/libbpfgo"
-	"github.com/aquasecurity/tracee/pkg/logger"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 )
 
 //
@@ -38,12 +39,12 @@ func (p *traceProbe) attach(module *bpf.Module, args ...interface{}) error {
 	}
 
 	if module == nil {
-		return logger.NewErrorf("incorrect arguments for event: %s", p.eventName)
+		return errfmt.Errorf("incorrect arguments for event: %s", p.eventName)
 	}
 
 	prog, err := module.GetProgram(p.programName)
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 
 	switch p.probeType {
@@ -62,7 +63,7 @@ func (p *traceProbe) attach(module *bpf.Module, args ...interface{}) error {
 	}
 
 	if err != nil {
-		return logger.NewErrorf("failed to attach event: %s (%v)", p.eventName, err)
+		return errfmt.Errorf("failed to attach event: %s (%v)", p.eventName, err)
 	}
 
 	p.bpfLink = link
@@ -80,7 +81,7 @@ func (p *traceProbe) detach(args ...interface{}) error {
 
 	err = p.bpfLink.Destroy()
 	if err != nil {
-		return logger.NewErrorf("failed to detach event: %s (%v)", p.eventName, err)
+		return errfmt.Errorf("failed to detach event: %s (%v)", p.eventName, err)
 	}
 
 	p.bpfLink = nil // NOTE: needed so a new call to bpf_link__destroy() works

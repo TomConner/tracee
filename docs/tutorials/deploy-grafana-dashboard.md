@@ -1,6 +1,6 @@
 # Deploy Grafana Dashboard
 
-Grafana is a visualization tools for exported metrics and logs, most commomly
+Grafana is a visualization tools for exported metrics and logs, most commonly
 used alongside prometheus.
 
 Since version 0.7.0, tracee exports useful runtime metrics to prometheus.
@@ -13,7 +13,7 @@ enabled using the `--metrics`.
 By using grafana and the new metrics from tracee, we can deploy a simple
 dashboard which tracks your tracee's instance performance and outputs.
 
-## Prequisites
+## Pre-requisites
 
 The following tools must be available for use, they can all be installed either
 through docker or installed/built on your machine.
@@ -27,8 +27,8 @@ through docker or installed/built on your machine.
 Tracee can be most easily deployed with metrics enabled by default and port
 forwarded through the following commands:
 
-```text
-$ docker run \
+```console
+docker run \
     --name tracee --rm --pid=host \
     --cgroupns=host --privileged \
     -v /tmp/tracee:/tmp/tracee  \
@@ -41,14 +41,14 @@ Of course, the forwarded metrics ports can be changed, but you should note that
 some of the later instructions depend on these ports.
 
 If running Tracee locally through built binaries, the metrics address may be
-overriden with the `--listen-addr` flag.
+overrides with the `--listen-addr` flag.
 
 ## Run Prometheus and Configure it to Scrape Tracee
 
 Install prometheus or pull it's docker image. Then create the following
 configuration file, call it `prometheus.yml` to scrape Tracee:
 
-```text
+```yaml
 # A scrape configuration containing exactly one endpoint to scrape:
 # Here it's Tracee.
 scrape_configs:
@@ -66,22 +66,22 @@ scrape_configs:
 
 We must then start prometheus with the following command:
 
-```
+```console
 prometheus --config.file=/path/to/prometheus.yml
 ```
 
 Or alternatively with docker:
 
-```
+```console
 docker run -p 9090:9090 -v /path/to/config:/etc/prometheus prom/prometheus
 ```
 
-Then, try to access prometheus through `http://localhost:9090`. If succesful,
+Then, try to access prometheus through `http://localhost:9090`. If successful,
 move to the next step, otherwise consult with prometheus documentation.
 
 ## Run Grafana to display Tracee's Prometheus Metrics
 
-After succesfuly deploying Tracee and Prometheus we may now run Grafana to
+After successfully deploying Tracee and Prometheus we may now run Grafana to
 visualize it's metrics.
 
 Install grafana using their instructions and enter the now available grafana

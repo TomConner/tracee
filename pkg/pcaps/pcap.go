@@ -4,10 +4,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/aquasecurity/tracee/pkg/logger"
-	"github.com/aquasecurity/tracee/types/trace"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcapgo"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
+	"github.com/aquasecurity/tracee/pkg/logger"
+	"github.com/aquasecurity/tracee/types/trace"
 )
 
 // Check pcaps.go for package description.
@@ -73,7 +75,7 @@ func NewPcap(e *trace.Event, t PcapType) (*Pcap, error) {
 
 	p.pcapFile, p.pcapWriter, err = getPcapFileAndWriter(e, t)
 
-	return p, logger.ErrorFunc(err)
+	return p, errfmt.WrapError(err)
 }
 
 func (p *Pcap) write(event *trace.Event, payload []byte) error {
@@ -83,12 +85,15 @@ func (p *Pcap) write(event *trace.Event, payload []byte) error {
 		Length:        int(len(payload)),
 	}
 
+	if err := p.pcapWriter.WritePacket(info, payload); err != nil {
+		return errfmt.WrapError(err)
+	}
 	p.writtenPkts++
 
-	p.pcapWriter.WritePacket(info, payload)
-
 	if p.writtenPkts >= flushAtPackets {
-		p.flush()
+		if err := p.flush(); err != nil {
+			logger.Errorw("Flushing pcap", "error", err)
+		}
 	}
 
 	return nil
@@ -96,11 +101,12 @@ func (p *Pcap) write(event *trace.Event, payload []byte) error {
 
 func (p *Pcap) flush() error {
 	p.writtenPkts = 0
-	p.pcapWriter.Flush()
-	return nil
+	return p.pcapWriter.Flush()
 }
 
 func (p *Pcap) close() error {
-	p.flush()
+	if err := p.flush(); err != nil {
+		logger.Errorw("Flushing pcap", "error", err)
+	}
 	return p.pcapFile.Close()
 }

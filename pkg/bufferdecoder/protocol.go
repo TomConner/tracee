@@ -12,6 +12,7 @@ const (
 	SendVfsWrite BinType = iota + 1
 	SendMprotect
 	SendKernelModule
+	SendBpfObject
 )
 
 // PLEASE NOTE, YOU MUST UPDATE THE DECODER IF ANY CHANGE TO THIS STRUCT IS DONE.
@@ -21,29 +22,29 @@ const (
 // NOTE: Integers want to be aligned in memory, so if changing the format of this struct
 // keep the 1-byte 'Argnum' as the final parameter before the padding (if padding is needed).
 type Context struct {
-	Ts            uint64
-	StartTime     uint64
-	CgroupID      uint64
-	Pid           uint32
-	Tid           uint32
-	Ppid          uint32
-	HostPid       uint32
-	HostTid       uint32
-	HostPpid      uint32
-	Uid           uint32
-	MntID         uint32
-	PidID         uint32
-	Comm          [16]byte
-	UtsName       [16]byte
-	Flags         uint32
-	EventID       events.ID //int32
-	Syscall       int32
-	MatchedScopes uint64
-	Retval        int64
-	StackID       uint32
-	ProcessorId   uint16
-	Argnum        uint8
-	_             [1]byte //padding
+	Ts              uint64
+	StartTime       uint64
+	CgroupID        uint64
+	Pid             uint32
+	Tid             uint32
+	Ppid            uint32
+	HostPid         uint32
+	HostTid         uint32
+	HostPpid        uint32
+	Uid             uint32
+	MntID           uint32
+	PidID           uint32
+	Comm            [16]byte
+	UtsName         [16]byte
+	Flags           uint32
+	EventID         events.ID //int32
+	Syscall         int32
+	MatchedPolicies uint64
+	Retval          int64
+	StackID         uint32
+	ProcessorId     uint16
+	Argnum          uint8
+	_               [1]byte //padding
 }
 
 func (Context) GetSizeBytes() uint32 {
@@ -53,13 +54,13 @@ func (Context) GetSizeBytes() uint32 {
 type ChunkMeta struct {
 	BinType  BinType
 	CgroupID uint64
-	Metadata [24]byte
+	Metadata [28]byte
 	Size     int32
 	Off      uint64
 }
 
 func (ChunkMeta) GetSizeBytes() uint32 {
-	return 45
+	return 49
 }
 
 type VfsWriteMeta struct {
@@ -77,11 +78,22 @@ type KernelModuleMeta struct {
 	DevID uint32
 	Inode uint64
 	Pid   uint32
-	Size  uint64
+	Size  uint32
 }
 
 func (KernelModuleMeta) GetSizeBytes() uint32 {
-	return 24
+	return 20
+}
+
+type BpfObjectMeta struct {
+	Name [16]byte
+	Rand uint32
+	Pid  uint32
+	Size uint32
+}
+
+func (BpfObjectMeta) GetSizeBytes() uint32 {
+	return 28
 }
 
 type MprotectWriteMeta struct {

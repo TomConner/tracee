@@ -96,6 +96,7 @@
 #include "common/memory.h"
 #include "common/network.h"
 #include "common/probes.h"
+#include "common/bpf_prog.h"
 
 char LICENSE[] SEC("license") = "GPL";
 #ifndef CORE
@@ -336,29 +337,22 @@ int sys_exit_submit(struct bpf_raw_tracepoint_args *ctx)
         return 0;
 
     syscall_data_t *sys = &p.task_info->syscall_data;
-    uint id = sys->id;
     long ret = ctx->args[1];
 
-    if ((id != SYSCALL_EXECVE && id != SYSCALL_EXECVEAT) ||
-        ((id == SYSCALL_EXECVE || id == SYSCALL_EXECVEAT) && (ret != 0))) {
-        // We can't use saved args after execve syscall, as pointers are
-        // invalid To avoid showing execve event both on entry and exit, we
-        // only output failed execs
-        if (!should_submit(id, &(p.event->context)))
-            return 0;
-        u64 types = 0;
-        u64 *saved_types = bpf_map_lookup_elem(&params_types_map, &id);
-        if (!saved_types) {
-            bpf_tail_call(ctx, &sys_exit_tails, id);
-            return 0;
-        }
-        types = *saved_types;
-        save_args_to_submit_buf(p.event, types, &sys->args);
-        p.event->context.ts = sys->ts;
-        events_perf_submit(&p, id, ret);
-    }
+    if (!should_submit(sys->id, p.event))
+        goto out;
 
-    bpf_tail_call(ctx, &sys_exit_tails, id);
+    // We can't use saved args after execve syscall, as pointers are invalid.
+    // To avoid showing execve event both on entry and exit, we only output failed execs.
+    if ((sys->id == SYSCALL_EXECVE || sys->id == SYSCALL_EXECVEAT) && (ret == 0))
+        goto out;
+
+    save_args_to_submit_buf(p.event, &sys->args);
+    p.event->context.ts = sys->ts;
+    events_perf_submit(&p, sys->id, ret);
+
+out:
+    bpf_tail_call(ctx, &sys_exit_tails, sys->id);
     return 0;
 }
 
@@ -378,7 +372,7 @@ int trace_sys_enter(struct bpf_raw_tracepoint_args *ctx)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(RAW_SYS_ENTER, &(p.event->context)))
+    if (!should_submit(RAW_SYS_ENTER, p.event))
         return 0;
 
     // always submit since this won't be attached otherwise
@@ -408,7 +402,7 @@ int trace_sys_exit(struct bpf_raw_tracepoint_args *ctx)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(RAW_SYS_EXIT, &(p.event->context)))
+    if (!should_submit(RAW_SYS_EXIT, p.event))
         return 0;
 
     // always submit since this won't be attached otherwise
@@ -440,8 +434,9 @@ int syscall__execve(void *ctx)
     if (!p.task_info->syscall_traced)
         return -1;
     syscall_data_t *sys = &p.task_info->syscall_data;
+    p.event->context.ts = sys->ts;
 
-    if (!should_submit(SYSCALL_EXECVE, &(p.event->context)))
+    if (!should_submit(SYSCALL_EXECVE, p.event))
         return 0;
 
     save_str_to_buf(p.event, (void *) sys->args.args[0] /*filename*/, 0);
@@ -463,8 +458,9 @@ int syscall__execveat(void *ctx)
     if (!p.task_info->syscall_traced)
         return -1;
     syscall_data_t *sys = &p.task_info->syscall_data;
+    p.event->context.ts = sys->ts;
 
-    if (!should_submit(SYSCALL_EXECVEAT, &(p.event->context)))
+    if (!should_submit(SYSCALL_EXECVEAT, p.event))
         return 0;
 
     save_to_submit_buf(p.event, (void *) &sys->args.args[0] /*dirfd*/, sizeof(int), 0);
@@ -480,7 +476,7 @@ int syscall__execveat(void *ctx)
 
 static __always_inline int send_socket_dup(program_data_t *p, u64 oldfd, u64 newfd)
 {
-    if (!should_submit(SOCKET_DUP, &(p->event->context)))
+    if (!should_submit(SOCKET_DUP, p->event))
         return 0;
 
     if (!check_fd_type(oldfd, S_IFSOCK)) {
@@ -633,8 +629,7 @@ int tracepoint__sched__sched_process_fork(struct bpf_raw_tracepoint_args *ctx)
     // follow every pid that passed the should_trace() checks (used by the follow filter)
     c_proc_info->follow_in_scopes = p.task_info->matched_scopes;
 
-    if (should_submit(SCHED_PROCESS_FORK, &(p.event->context)) ||
-        p.config->options & OPT_PROCESS_INFO) {
+    if (should_submit(SCHED_PROCESS_FORK, p.event) || p.config->options & OPT_PROCESS_INFO) {
         int parent_ns_pid = get_task_ns_pid(parent);
         int parent_ns_tgid = get_task_ns_tgid(parent);
         int child_ns_pid = get_task_ns_pid(child);
@@ -652,6 +647,356 @@ int tracepoint__sched__sched_process_fork(struct bpf_raw_tracepoint_args *ctx)
 
         events_perf_submit(&p, SCHED_PROCESS_FORK, 0);
     }
+
+    return 0;
+}
+
+// number of iterations - value that the verifier was seen to cope with - the higher, the better
+#define MAX_NUM_MODULES 600
+
+// This map is only used from kernels 5.2 and above.
+// If we won't create the map, the userspace will receive an error when interacting with it,
+// and since the userspace is not kernel version aware, it won't know whether it's because
+// the map simply wasn't created due to kernel version, or something unexpected failed.
+BPF_HASH(modules_map, u64, kernel_module_t, MAX_NUM_MODULES);
+
+void __always_inline send_hidden_module(u64 mod_addr, char *mod_name, program_data_t *p)
+{
+    reset_event_args(p);
+    save_to_submit_buf(p->event, &mod_addr, sizeof(u64), 0);
+    save_bytes_to_buf(p->event,
+                      (void *) mod_name,
+                      MODULE_NAME_LEN & MAX_MEM_DUMP_SIZE,
+                      1); // this is actually a string, the argument is saved as bytes since the
+                          // verifier didn't like it as str
+
+    events_perf_submit(p, HIDDEN_KERNEL_MODULE_SEEKER, 0);
+}
+
+// Populate all the modules to an efficient query-able hash map.
+// We can't read it once and then hook on do_init_module and free_module since a hidden module will
+// remove itself from the list directly and we wouldn't know (hence from our perspective the module
+// will reside in the modules list, which could be false). So on every trigger, we go over the
+// modules list and populate the map. It gets clean in userspace before every run.
+// Since this mechanism is suppose to be triggered every once in a while,
+// this should be ok.
+static __always_inline bool init_shown_modules()
+{
+    char modules_sym[8] = "modules";
+    struct list_head *head = (struct list_head *) get_symbol_addr(modules_sym);
+    bool iterated_all_modules = false;
+    struct module *pos, *n;
+    kernel_module_t *mod_from_map;
+
+    pos = list_first_entry_ebpf(head, typeof(*pos), list);
+    n = pos;
+
+#pragma unroll
+    for (int i = 0; i < MAX_NUM_MODULES; i++) {
+        pos = n;
+        n = list_next_entry_ebpf(n, list);
+
+        if (&pos->list == head) {
+            iterated_all_modules = true;
+            break;
+        }
+        mod_from_map = bpf_map_lookup_elem(&modules_map, &pos);
+        if (mod_from_map == NULL) {
+            kernel_module_t m = {.seen_modules_list = true};
+            bpf_map_update_elem(&modules_map, &pos, &m, BPF_ANY);
+        } else {
+            mod_from_map->seen_modules_list = true; // updates the entry in map
+        }
+    }
+
+    return !iterated_all_modules; // false is valid value
+}
+
+static __always_inline bool is_hidden(u64 mod)
+{
+    kernel_module_t *mod_from_map = bpf_map_lookup_elem(&modules_map, &mod);
+    if (mod_from_map == NULL) {
+        return true; // if we don't find the module in our map, it means the module is hidden
+    } else {
+        return !mod_from_map->seen_modules_list; // if it wasn't seen in modules list, it's hidden
+    }
+}
+
+static __always_inline bool find_modules_from_module_kset_list(program_data_t *p)
+{
+    char module_kset_sym[12] = "module_kset";
+    struct kset *mod_kset = (struct kset *) get_symbol_addr(module_kset_sym);
+    struct list_head *head = &(mod_kset->list);
+    struct kobject *pos = list_first_entry_ebpf(head, typeof(*pos), entry);
+    struct kobject *n = list_next_entry_ebpf(pos, entry);
+    bool finished_iterating = false;
+
+#pragma unroll
+    for (int i = 0; i < MAX_NUM_MODULES; i++) {
+        if (READ_KERN(n->name) == NULL) { // Without this the list seems infinite. Also, using pos
+                                          // here seems incorrect as it starts from a weird member
+            finished_iterating = true;
+            break;
+        }
+
+        struct module_kobject *mod_kobj =
+            (struct module_kobject *) container_of(n, struct module_kobject, kobj);
+        if (mod_kobj) {
+            struct module *mod = READ_KERN(mod_kobj->mod);
+            if (mod) {
+                if (is_hidden((u64) mod)) {
+                    send_hidden_module((u64) mod, mod->name, p);
+                }
+            }
+        }
+
+        pos = n;
+        n = list_next_entry_ebpf(n, entry);
+    }
+
+    return !finished_iterating;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0) || defined(CORE)
+BPF_QUEUE(walk_mod_tree_queue, rb_node_t, 2048); // used to walk a rb tree
+
+    #ifdef CORE // in non CORE builds it's already defined
+static __always_inline struct latch_tree_node *__lt_from_rb(struct rb_node *node, int idx)
+{
+    return container_of(node, struct latch_tree_node, node[idx]);
+}
+    #endif
+
+static __always_inline bool walk_mod_tree(program_data_t *p, struct rb_node *root, int idx)
+{
+    struct latch_tree_node *ltn;
+    struct module *mod;
+    bool finished_iterating = false;
+    struct rb_node *curr = root;
+
+    #pragma unroll
+    for (int i = 0; i < MAX_NUM_MODULES; i++) {
+        if (curr != NULL) {
+            rb_node_t rb_nod = {.node = curr};
+            bpf_map_push_elem(&walk_mod_tree_queue, &rb_nod, BPF_EXIST);
+
+            curr = READ_KERN(curr->rb_left); // Move left
+        } else {
+            rb_node_t rb_nod;
+            if (bpf_map_pop_elem(&walk_mod_tree_queue, &rb_nod) != 0) {
+                finished_iterating = true;
+                break;
+            } else {
+                curr = rb_nod.node;
+                ltn = __lt_from_rb(curr, idx);
+                mod = READ_KERN(container_of(ltn, struct mod_tree_node, node)->mod);
+
+                if (is_hidden((u64) mod)) {
+                    send_hidden_module((u64) mod, mod->name, p);
+                }
+
+                /* We have visited the node and its left subtree.
+                Now, it's right subtree's turn */
+                curr = READ_KERN(curr->rb_right);
+            }
+        }
+    }
+
+    return !finished_iterating;
+}
+
+struct mod_tree_root {
+    struct latch_tree_root root;
+};
+
+static __always_inline bool find_modules_from_mod_tree(program_data_t *p)
+{
+    char mod_tree_sym[9] = "mod_tree";
+    struct mod_tree_root *m_tree = (struct mod_tree_root *) get_symbol_addr(mod_tree_sym);
+    unsigned int seq;
+    #ifdef CORE
+    if (bpf_core_field_exists(m_tree->root.seq.sequence)) {
+        seq = READ_KERN(m_tree->root.seq.sequence); // below 5.10
+    } else {
+        seq = READ_KERN(m_tree->root.seq.seqcount.sequence); // version >= v5.10
+    }
+    #else
+        #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
+    seq = READ_KERN(m_tree->root.seq.sequence);
+        #else
+    seq = READ_KERN(m_tree->root.seq.seqcount.sequence);
+        #endif
+    #endif
+
+    struct rb_node *node = READ_KERN(m_tree->root.tree[seq & 1].rb_node);
+
+    return walk_mod_tree(p, node, seq & 1);
+}
+#endif
+
+static __always_inline bool check_is_proc_modules_hooked(program_data_t *p)
+{
+    struct module *pos, *n;
+    bool finished_iterating = false;
+    char modules_sym[8] = "modules";
+    kernel_module_t *mod_from_map;
+    struct list_head *head = (struct list_head *) get_symbol_addr(modules_sym);
+
+    pos = list_first_entry_ebpf(head, typeof(*pos), list);
+    n = pos;
+
+#pragma unroll
+    for (int i = 0; i < MAX_NUM_MODULES; i++) {
+        pos = n;
+        n = list_next_entry_ebpf(n, list);
+        if (&pos->list == head) {
+            finished_iterating = true;
+            break;
+        }
+
+        u64 key = (u64) pos;
+        mod_from_map = bpf_map_lookup_elem(&modules_map, &key);
+        if ((mod_from_map == NULL) || (mod_from_map != NULL && !mod_from_map->seen_proc_modules)) {
+            // Check again with the address being the start of the memory area, since
+            // there's a chance the module is in /proc/modules but not in /proc/kallsyms (since the
+            // file can be hooked).
+            key = (u64) READ_KERN(pos->core_layout.base);
+            mod_from_map = bpf_map_lookup_elem(&modules_map, &key);
+            // No need to check for seen_proc_modules flag here since if it IS in the map
+            // with the address being the start of the memory area, it necessarily got inserted
+            // to the map via the /proc/modules userspace logic.
+            if (mod_from_map == NULL) {
+                // Module was not seen in proc modules, report.
+                send_hidden_module((u64) pos, pos->name, p);
+            }
+
+            // We couldn't resolve the address from kallsyms but we did see the module in
+            // /proc/modules. This probably means that /proc/kallsyms is hooked, but we consider
+            // this module not hidden, as tools like lsmod will show it. Thus we gracefully continue
+            // and don't report this.
+        }
+    }
+
+    return !finished_iterating;
+}
+
+static __always_inline bool kern_ver_below_min_lkm(struct pt_regs *ctx)
+{
+// If we're below kernel version 5.2, propogate error to userspace and return
+#ifdef CORE
+    if (!bpf_core_enum_value_exists(enum bpf_func_id, BPF_FUNC_sk_storage_get)) {
+        goto below_threshold;
+    }
+#else
+    #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0))
+    goto below_threshold;
+    #endif
+#endif
+
+    return false; // lkm seeker may run!
+
+below_threshold:
+    tracee_log(ctx,
+               BPF_LOG_LVL_ERROR,
+               BPF_LOG_ID_UNSPEC,
+               -1); // notify the user that the event logic isn't loaded even though it's requested
+    return true;
+}
+
+SEC("uprobe/lkm_seeker")
+int uprobe_lkm_seeker(struct pt_regs *ctx)
+{
+    if (kern_ver_below_min_lkm(ctx))
+        return 0;
+
+    program_data_t p = {};
+    if (!init_program_data(&p, ctx))
+        return 0;
+
+    // Uprobes are not triggered by syscalls, so we need to override the false value.
+    p.event->context.syscall = NO_SYSCALL;
+    p.event->context.matched_policies = ULLONG_MAX;
+
+    u32 trigger_pid = bpf_get_current_pid_tgid() >> 32;
+    // uprobe was triggered from other tracee instance
+    if (p.config->tracee_pid != trigger_pid) {
+        return 0;
+    }
+
+    if (init_shown_modules() != 0) {
+        tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_UNSPEC, 1);
+        return 1;
+    }
+
+    bpf_tail_call(ctx, &prog_array, TAIL_HIDDEN_KERNEL_MODULE_PROC);
+
+    return -1;
+}
+
+SEC("uprobe/lkm_seeker_proc_tail")
+int lkm_seeker_proc_tail(struct pt_regs *ctx)
+{
+    // This check is to satisfy the verifier for kernels older than 5.2
+    // as in runtime we'll never get here (the tail call doesn't happen)
+    if (kern_ver_below_min_lkm(ctx))
+        return 0;
+
+    program_data_t p = {};
+    if (!init_tailcall_program_data(&p, ctx))
+        return -1;
+
+    if (check_is_proc_modules_hooked(&p) != 0) {
+        tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_UNSPEC, 2);
+        return 1;
+    }
+
+    bpf_tail_call(ctx, &prog_array, TAIL_HIDDEN_KERNEL_MODULE_KSET);
+
+    return -1;
+}
+
+SEC("uprobe/lkm_seeker_kset_tail")
+int lkm_seeker_kset_tail(struct pt_regs *ctx)
+{
+    // This check is to satisfy the verifier for kernels older than 5.2
+    // as in runtime we'll never get here (the tail call doesn't happen)
+    if (kern_ver_below_min_lkm(ctx))
+        return 0;
+
+    program_data_t p = {};
+    if (!init_tailcall_program_data(&p, ctx))
+        return -1;
+
+    if (find_modules_from_module_kset_list(&p) != 0) {
+        tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_UNSPEC, 3);
+        return 1;
+    }
+
+    bpf_tail_call(ctx, &prog_array, TAIL_HIDDEN_KERNEL_MODULE_MOD_TREE);
+
+    return -1;
+}
+
+SEC("uprobe/lkm_seeker_mod_tree_tail")
+int lkm_seeker_mod_tree_tail(struct pt_regs *ctx)
+{
+    // This check is to satisfy the verifier for kernels older than 5.2
+    // as in runtime we'll never get here (the tail call doesn't happen)
+    if (kern_ver_below_min_lkm(ctx))
+        return 0;
+
+    program_data_t p = {};
+    if (!init_tailcall_program_data(&p, ctx))
+        return -1;
+
+        // This method is efficient only when the kernel is compiled with
+        // CONFIG_MODULES_TREE_LOOKUP=y
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0) || defined(CORE)
+    if (find_modules_from_mod_tree(&p) != 0) {
+        tracee_log(ctx, BPF_LOG_LVL_ERROR, BPF_LOG_ID_UNSPEC, 4);
+        return 1;
+    }
+#endif
 
     return 0;
 }
@@ -710,7 +1055,7 @@ int tracepoint__sched__sched_process_exec(struct bpf_raw_tracepoint_args *ctx)
     // Follow this task for matched scopes
     proc_info->follow_in_scopes = p.task_info->matched_scopes;
 
-    if (!should_submit(SCHED_PROCESS_EXEC, &(p.event->context)) &&
+    if (!should_submit(SCHED_PROCESS_EXEC, p.event) &&
         (p.config->options & OPT_PROCESS_INFO) != OPT_PROCESS_INFO)
         return 0;
 
@@ -822,8 +1167,7 @@ int tracepoint__sched__sched_process_exit(struct bpf_raw_tracepoint_args *ctx)
 
     long exit_code = get_task_exit_code(p.event->task);
 
-    if (should_submit(SCHED_PROCESS_EXIT, &(p.event->context)) ||
-        p.config->options & OPT_PROCESS_INFO) {
+    if (should_submit(SCHED_PROCESS_EXIT, p.event) || p.config->options & OPT_PROCESS_INFO) {
         save_to_submit_buf(p.event, (void *) &exit_code, sizeof(long), 0);
         save_to_submit_buf(p.event, (void *) &group_dead, sizeof(bool), 1);
 
@@ -933,7 +1277,7 @@ int tracepoint__sched__sched_switch(struct bpf_raw_tracepoint_args *ctx)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SCHED_SWITCH, &(p.event->context)))
+    if (!should_submit(SCHED_SWITCH, p.event))
         return 0;
 
     struct task_struct *prev = (struct task_struct *) ctx->args[1];
@@ -961,7 +1305,7 @@ int BPF_KPROBE(trace_filldir64)
     if (!should_trace((&p)))
         return 0;
 
-    if (!should_submit(HIDDEN_INODES, &(p.event->context)))
+    if (!should_submit(HIDDEN_INODES, p.event))
         return 0;
 
     char *process_name = (char *) PT_REGS_PARM2(ctx);
@@ -983,7 +1327,7 @@ int BPF_KPROBE(trace_call_usermodehelper)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(CALL_USERMODE_HELPER, &(p.event->context)))
+    if (!should_submit(CALL_USERMODE_HELPER, p.event))
         return 0;
 
     void *path = (void *) PT_REGS_PARM1(ctx);
@@ -1009,7 +1353,7 @@ int BPF_KPROBE(trace_do_exit)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(DO_EXIT, &(p.event->context)))
+    if (!should_submit(DO_EXIT, p.event))
         return 0;
 
     long code = PT_REGS_PARM1(ctx);
@@ -1060,7 +1404,7 @@ int uprobe_syscall_trigger(struct pt_regs *ctx)
 
     // Uprobes are not triggered by syscalls, so we need to override the false value.
     p.event->context.syscall = NO_SYSCALL;
-    p.event->context.matched_scopes = 0xFFFFFFFFFFFFFFFF;
+    p.event->context.matched_policies = ULLONG_MAX;
 
     // uprobe was triggered from other tracee instance
     if (p.config->tracee_pid != trigger_pid)
@@ -1157,7 +1501,7 @@ int uprobe_seq_ops_trigger(struct pt_regs *ctx)
 
     // Uprobes are not triggered by syscalls, so we need to override the false value.
     p.event->context.syscall = NO_SYSCALL;
-    p.event->context.matched_scopes = 0xFFFFFFFFFFFFFFFF;
+    p.event->context.matched_policies = ULLONG_MAX;
 
     // uprobe was triggered from other tracee instance
     if (p.config->tracee_pid != trigger_pid)
@@ -1238,7 +1582,7 @@ int uprobe_mem_dump_trigger(struct pt_regs *ctx)
 
     // Uprobes are not triggered by syscalls, so we need to override the false value.
     p.event->context.syscall = NO_SYSCALL;
-    p.event->context.matched_scopes = 0xFFFFFFFFFFFFFFFF;
+    p.event->context.matched_policies = ULLONG_MAX;
 
     // uprobe was triggered from other tracee instance
     if (p.config->tracee_pid != trigger_pid)
@@ -1317,7 +1661,7 @@ enum perf_type_e
 static __always_inline int
 send_bpf_attach(program_data_t *p, struct file *bpf_prog_file, struct file *perf_event_file)
 {
-    if (!should_submit(BPF_ATTACH, &(p->event->context))) {
+    if (!should_submit(BPF_ATTACH, p->event)) {
         return 0;
     }
 
@@ -1434,10 +1778,10 @@ send_bpf_attach(program_data_t *p, struct file *bpf_prog_file, struct file *perf
     struct bpf_prog_aux *prog_aux = READ_KERN(prog->aux);
     u32 prog_id = READ_KERN(prog_aux->id);
     char prog_name[BPF_OBJ_NAME_LEN];
-    bpf_probe_read_str(&prog_name, BPF_OBJ_NAME_LEN, READ_KERN(prog_aux->name));
+    bpf_probe_read_str(&prog_name, BPF_OBJ_NAME_LEN, prog_aux->name);
 
     // get usage of helpers
-    bpf_attach_t *val = bpf_map_lookup_elem(&bpf_attach_map, &prog_id);
+    bpf_used_helpers_t *val = bpf_map_lookup_elem(&bpf_attach_map, &prog_id);
     if (val == NULL)
         return 0;
 
@@ -1445,10 +1789,10 @@ send_bpf_attach(program_data_t *p, struct file *bpf_prog_file, struct file *perf
 
     save_to_submit_buf(p->event, &prog_type, sizeof(int), 0);
     save_str_to_buf(p->event, (void *) &prog_name, 1);
-    save_str_to_buf(p->event, (void *) &event_name, 2);
-    save_to_submit_buf(p->event, &probe_addr, sizeof(u64), 3);
-    save_to_submit_buf(p->event, &val->write_user, sizeof(int), 4);
-    save_to_submit_buf(p->event, &val->override_return, sizeof(int), 5);
+    save_to_submit_buf(p->event, &prog_id, sizeof(u32), 2);
+    save_u64_arr_to_buf(p->event, (const u64 *) val->helpers, 4, 3);
+    save_str_to_buf(p->event, (void *) &event_name, 4);
+    save_to_submit_buf(p->event, &probe_addr, sizeof(u64), 5);
     save_to_submit_buf(p->event, &perf_type, sizeof(int), 6);
 
     events_perf_submit(p, BPF_ATTACH, 0);
@@ -1494,7 +1838,7 @@ int tracepoint__cgroup__cgroup_attach_task(struct bpf_raw_tracepoint_args *ctx)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(CGROUP_ATTACH_TASK, &(p.event->context)))
+    if (!should_submit(CGROUP_ATTACH_TASK, p.event))
         return 0;
 
     char *path = (char *) ctx->args[1];
@@ -1519,7 +1863,7 @@ int tracepoint__cgroup__cgroup_mkdir(struct bpf_raw_tracepoint_args *ctx)
     if (!init_program_data(&p, ctx))
         return 0;
 
-    p.event->context.matched_scopes = 0xFFFFFFFFFFFFFFFF; // see tracee.GetEssentialEvents
+    p.event->context.matched_policies = ULLONG_MAX; // see tracee.GetEssentialEvents
 
     struct cgroup *dst_cgrp = (struct cgroup *) ctx->args[0];
     char *path = (char *) ctx->args[1];
@@ -1555,7 +1899,7 @@ int tracepoint__cgroup__cgroup_rmdir(struct bpf_raw_tracepoint_args *ctx)
     if (!init_program_data(&p, ctx))
         return 0;
 
-    p.event->context.matched_scopes = 0xFFFFFFFFFFFFFFFF; // see tracee.GetEssentialEvents
+    p.event->context.matched_policies = ULLONG_MAX; // see tracee.GetEssentialEvents
 
     struct cgroup *dst_cgrp = (struct cgroup *) ctx->args[0];
     char *path = (char *) ctx->args[1];
@@ -1589,7 +1933,7 @@ int BPF_KPROBE(trace_security_bprm_check)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_BPRM_CHECK, &(p.event->context)))
+    if (!should_submit(SECURITY_BPRM_CHECK, p.event))
         return 0;
 
     struct linux_binprm *bprm = (struct linux_binprm *) PT_REGS_PARM1(ctx);
@@ -1615,7 +1959,7 @@ int BPF_KPROBE(trace_security_file_open)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_FILE_OPEN, &(p.event->context)))
+    if (!should_submit(SECURITY_FILE_OPEN, p.event))
         return 0;
 
     struct file *file = (struct file *) PT_REGS_PARM1(ctx);
@@ -1662,7 +2006,7 @@ int BPF_KPROBE(trace_security_sb_mount)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_SB_MOUNT, &(p.event->context)))
+    if (!should_submit(SECURITY_SB_MOUNT, p.event))
         return 0;
 
     const char *dev_name = (const char *) PT_REGS_PARM1(ctx);
@@ -1690,7 +2034,7 @@ int BPF_KPROBE(trace_security_inode_unlink)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_INODE_UNLINK, &(p.event->context)))
+    if (!should_submit(SECURITY_INODE_UNLINK, p.event))
         return 0;
 
     // struct inode *dir = (struct inode *)PT_REGS_PARM1(ctx);
@@ -1718,7 +2062,7 @@ int BPF_KPROBE(trace_commit_creds)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(COMMIT_CREDS, &(p.event->context)))
+    if (!should_submit(COMMIT_CREDS, p.event))
         return 0;
 
     struct cred *new = (struct cred *) PT_REGS_PARM1(ctx);
@@ -1807,7 +2151,7 @@ int BPF_KPROBE(trace_switch_task_namespaces)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SWITCH_TASK_NS, &(p.event->context)))
+    if (!should_submit(SWITCH_TASK_NS, p.event))
         return 0;
 
     struct task_struct *task = (struct task_struct *) PT_REGS_PARM1(ctx);
@@ -1860,7 +2204,7 @@ int BPF_KPROBE(trace_cap_capable)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(CAP_CAPABLE, &(p.event->context)))
+    if (!should_submit(CAP_CAPABLE, p.event))
         return 0;
 
     int cap = PT_REGS_PARM3(ctx);
@@ -1884,7 +2228,7 @@ int BPF_KPROBE(trace_security_socket_create)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_SOCKET_CREATE, &(p.event->context)))
+    if (!should_submit(SECURITY_SOCKET_CREATE, p.event))
         return 0;
 
     int family = (int) PT_REGS_PARM1(ctx);
@@ -1910,7 +2254,7 @@ int BPF_KPROBE(trace_security_inode_symlink)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_INODE_SYMLINK, &(p.event->context)))
+    if (!should_submit(SECURITY_INODE_SYMLINK, p.event))
         return 0;
 
     // struct inode *dir = (struct inode *)PT_REGS_PARM1(ctx);
@@ -1935,7 +2279,7 @@ int BPF_KPROBE(trace_proc_create)
     if (!should_trace((&p)))
         return 0;
 
-    if (!should_submit(PROC_CREATE, &(p.event->context)))
+    if (!should_submit(PROC_CREATE, p.event))
         return 0;
 
     char *name = (char *) PT_REGS_PARM1(ctx);
@@ -1957,7 +2301,7 @@ int BPF_KPROBE(trace_debugfs_create_file)
     if (!should_trace((&p)))
         return 0;
 
-    if (!should_submit(DEBUGFS_CREATE_FILE, &(p.event->context)))
+    if (!should_submit(DEBUGFS_CREATE_FILE, p.event))
         return 0;
 
     char *name = (char *) PT_REGS_PARM1(ctx);
@@ -1984,7 +2328,7 @@ int BPF_KPROBE(trace_debugfs_create_dir)
     if (!should_trace((&p)))
         return 0;
 
-    if (!should_submit(DEBUGFS_CREATE_DIR, &(p.event->context)))
+    if (!should_submit(DEBUGFS_CREATE_DIR, p.event))
         return 0;
 
     char *name = (char *) PT_REGS_PARM1(ctx);
@@ -2007,7 +2351,7 @@ int BPF_KPROBE(trace_security_socket_listen)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_SOCKET_LISTEN, &(p.event->context)))
+    if (!should_submit(SECURITY_SOCKET_LISTEN, p.event))
         return 0;
 
     struct socket *sock = (struct socket *) PT_REGS_PARM1(ctx);
@@ -2035,7 +2379,7 @@ int BPF_KPROBE(trace_security_socket_connect)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_SOCKET_CONNECT, &(p.event->context)))
+    if (!should_submit(SECURITY_SOCKET_CONNECT, p.event))
         return 0;
 
     struct sockaddr *address = (struct sockaddr *) PT_REGS_PARM2(ctx);
@@ -2088,14 +2432,14 @@ int BPF_KPROBE(trace_security_socket_accept)
     struct socket *new_sock = (struct socket *) PT_REGS_PARM2(ctx);
 
     // save sockets for "socket_accept event"
-    if (should_submit(SOCKET_ACCEPT, &(p.event->context))) {
+    if (should_submit(SOCKET_ACCEPT, p.event)) {
         args_t args = {};
         args.args[0] = (unsigned long) sock;
         args.args[1] = (unsigned long) new_sock;
         save_args(&args, SOCKET_ACCEPT);
     }
 
-    if (!should_submit(SECURITY_SOCKET_ACCEPT, &(p.event->context)))
+    if (!should_submit(SECURITY_SOCKET_ACCEPT, p.event))
         return 0;
 
     // Load the arguments given to the accept syscall (which eventually invokes this function)
@@ -2119,7 +2463,7 @@ int BPF_KPROBE(trace_security_socket_bind)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_SOCKET_BIND, &(p.event->context)))
+    if (!should_submit(SECURITY_SOCKET_BIND, p.event))
         return 0;
 
     struct socket *sock = (struct socket *) PT_REGS_PARM1(ctx);
@@ -2189,7 +2533,7 @@ int BPF_KPROBE(trace_security_socket_setsockopt)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_SOCKET_SETSOCKOPT, &(p.event->context)))
+    if (!should_submit(SECURITY_SOCKET_SETSOCKOPT, p.event))
         return 0;
 
     struct socket *sock = (struct socket *) PT_REGS_PARM1(ctx);
@@ -2220,6 +2564,22 @@ enum bin_type_e
     SEND_KERNEL_MODULE,
 };
 
+static __always_inline u32 tail_call_send_bin(void *ctx,
+                                              program_data_t *p,
+                                              bin_args_t *bin_args,
+                                              int tail_call)
+{
+    if (p->event->buf_off < ARGS_BUF_SIZE - sizeof(bin_args_t)) {
+        bpf_probe_read(&(p->event->args[p->event->buf_off]), sizeof(bin_args_t), bin_args);
+        if (tail_call == TAIL_SEND_BIN)
+            bpf_tail_call(ctx, &prog_array, tail_call);
+        else if (tail_call == TAIL_SEND_BIN_TP)
+            bpf_tail_call(ctx, &prog_array_tp, tail_call);
+    }
+
+    return 0;
+}
+
 static __always_inline u32 send_bin_helper(void *ctx, void *prog_array, int tail_call)
 {
     // Note: sending the data to the userspace have the following constraints:
@@ -2233,13 +2593,13 @@ static __always_inline u32 send_bin_helper(void *ctx, void *prog_array, int tail
 
     int i = 0;
     unsigned int chunk_size;
-    u64 id = bpf_get_current_pid_tgid();
+    u32 zero = 0;
 
-    bin_args_t *bin_args = bpf_map_lookup_elem(&bin_args_map, &id);
-    if (bin_args == 0) {
-        // missed entry or not traced
+    event_data_t *event = bpf_map_lookup_elem(&event_data_map, &zero);
+    if (!event || (event->buf_off > ARGS_BUF_SIZE - sizeof(bin_args_t)))
         return 0;
-    }
+
+    bin_args_t *bin_args = (bin_args_t *) &(event->args[event->buf_off]);
 
     if (bin_args->full_size <= 0) {
         // If there are more vector elements, continue to the next one
@@ -2252,15 +2612,12 @@ static __always_inline u32 send_bin_helper(void *ctx, void *prog_array, int tail
             bin_args->full_size = io_vec.iov_len;
             bpf_tail_call(ctx, prog_array, tail_call);
         }
-        bpf_map_delete_elem(&bin_args_map, &id);
         return 0;
     }
 
     buf_t *file_buf_p = get_buf(FILE_BUF_IDX);
-    if (file_buf_p == NULL) {
-        bpf_map_delete_elem(&bin_args_map, &id);
+    if (file_buf_p == NULL)
         return 0;
-    }
 
 #define F_SEND_TYPE  0
 #define F_CGROUP_ID  (F_SEND_TYPE + sizeof(u8))
@@ -2272,17 +2629,7 @@ static __always_inline u32 send_bin_helper(void *ctx, void *prog_array, int tail
 
     bpf_probe_read((void **) &(file_buf_p->buf[F_SEND_TYPE]), sizeof(u8), &bin_args->type);
 
-    int zero = 0;
-    config_entry_t *config = bpf_map_lookup_elem(&config_map, &zero);
-    if (config == NULL)
-        return 0;
-
-    u64 cgroup_id;
-    if (config->options & OPT_CGROUP_V1) {
-        cgroup_id = get_cgroup_v1_subsys0_id((struct task_struct *) bpf_get_current_task());
-    } else {
-        cgroup_id = bpf_get_current_cgroup_id();
-    }
+    u64 cgroup_id = event->context.task.cgroup_id;
     bpf_probe_read((void **) &(file_buf_p->buf[F_CGROUP_ID]), sizeof(u64), &cgroup_id);
 
     // Save metadata to be used in filename
@@ -2321,7 +2668,6 @@ static __always_inline u32 send_bin_helper(void *ctx, void *prog_array, int tail
         // Handle the rest of write recursively
         bin_args->full_size = chunk_size;
         bpf_tail_call(ctx, prog_array, tail_call);
-        bpf_map_delete_elem(&bin_args_map, &id);
         return 0;
     }
 
@@ -2349,7 +2695,6 @@ static __always_inline u32 send_bin_helper(void *ctx, void *prog_array, int tail
         bpf_tail_call(ctx, prog_array, tail_call);
     }
 
-    bpf_map_delete_elem(&bin_args_map, &id);
     return 0;
 }
 
@@ -2404,7 +2749,7 @@ static __always_inline bool should_submit_io_event(u32 event_id, program_data_t 
 {
     return ((event_id == VFS_READ || event_id == VFS_READV || event_id == VFS_WRITE ||
              event_id == VFS_WRITEV || event_id == __KERNEL_WRITE) &&
-            should_submit(event_id, &(p->event->context)));
+            should_submit(event_id, p->event));
 }
 
 /** do_file_io_operation - generic file IO (read and write) event creator.
@@ -2430,7 +2775,7 @@ do_file_io_operation(struct pt_regs *ctx, u32 event_id, u32 tail_call_id, bool i
         return 0;
     }
 
-    bool should_submit_magic_write = should_submit(MAGIC_WRITE, &(p.event->context));
+    bool should_submit_magic_write = should_submit(MAGIC_WRITE, p.event);
     bool should_submit_io = should_submit_io_event(event_id, &p);
 
     if (!should_submit_io && !should_submit_magic_write) {
@@ -2570,7 +2915,6 @@ static __always_inline int capture_file_write(struct pt_regs *ctx, u32 event_id)
     if (start_pos != 0)
         start_pos -= PT_REGS_RC(ctx);
 
-    u64 id = bpf_get_current_pid_tgid();
     u32 pid = p.event->context.task.pid;
 
     if (p.event->buf_off > ARGS_BUF_SIZE - MAX_STRING_SIZE)
@@ -2599,10 +2943,9 @@ static __always_inline int capture_file_write(struct pt_regs *ctx, u32 event_id)
             bin_args.full_size = io_vec.iov_len;
         }
     }
-    bpf_map_update_elem(&bin_args_map, &id, &bin_args, BPF_ANY);
 
-    // Send file data
-    bpf_tail_call(ctx, &prog_array, TAIL_SEND_BIN);
+    tail_call_send_bin(ctx, &p, &bin_args, TAIL_SEND_BIN);
+
     return 0;
 }
 
@@ -2704,7 +3047,7 @@ int BPF_KPROBE(trace_mmap_alert)
     int prot = sys->args.args[2];
 
     if ((prot & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC) &&
-        should_submit(MEM_PROT_ALERT, &(p.event->context))) {
+        should_submit(MEM_PROT_ALERT, p.event)) {
         u32 alert = ALERT_MMAP_W_X;
         int fd = sys->args.args[5];
         void *addr = (void *) sys->args.args[0];
@@ -2728,7 +3071,7 @@ int BPF_KPROBE(trace_ret_do_mmap)
     if (!init_program_data(&p, ctx))
         return 0;
 
-    if (!should_submit(DO_MMAP, &(p.event->context)))
+    if (!should_submit(DO_MMAP, p.event))
         return 0;
 
     args_t saved_args;
@@ -2782,8 +3125,8 @@ int BPF_KPROBE(trace_security_mmap_file)
     if (!should_trace(&p))
         return 0;
 
-    bool submit_sec_mmap_file = should_submit(SECURITY_MMAP_FILE, &(p.event->context));
-    bool submit_shared_object_loaded = should_submit(SHARED_OBJECT_LOADED, &(p.event->context));
+    bool submit_sec_mmap_file = should_submit(SECURITY_MMAP_FILE, p.event);
+    bool submit_shared_object_loaded = should_submit(SHARED_OBJECT_LOADED, p.event);
 
     if (!submit_sec_mmap_file && !submit_shared_object_loaded)
         return 0;
@@ -2837,8 +3180,8 @@ int BPF_KPROBE(trace_security_file_mprotect)
         (sys->id != SYSCALL_MPROTECT && sys->id != SYSCALL_PKEY_MPROTECT))
         return 0;
 
-    int should_submit_mprotect = should_submit(SECURITY_FILE_MPROTECT, &(p.event->context));
-    int should_submit_mem_prot_alert = should_submit(MEM_PROT_ALERT, &(p.event->context));
+    int should_submit_mprotect = should_submit(SECURITY_FILE_MPROTECT, p.event);
+    int should_submit_mem_prot_alert = should_submit(MEM_PROT_ALERT, p.event);
 
     if (!should_submit_mprotect && !should_submit_mem_prot_alert) {
         return 0;
@@ -2916,9 +3259,7 @@ int BPF_KPROBE(trace_security_file_mprotect)
             bin_args.start_off = 0;
             bin_args.full_size = len;
 
-            u64 id = bpf_get_current_pid_tgid();
-            bpf_map_update_elem(&bin_args_map, &id, &bin_args, BPF_ANY);
-            bpf_tail_call(ctx, &prog_array, TAIL_SEND_BIN);
+            tail_call_send_bin(ctx, &p, &bin_args, TAIL_SEND_BIN);
         }
     }
 
@@ -2953,9 +3294,7 @@ int syscall__init_module(void *ctx)
         bin_args.start_off = 0;
         bin_args.full_size = (unsigned int) len;
 
-        u64 id = bpf_get_current_pid_tgid();
-        bpf_map_update_elem(&bin_args_map, &id, &bin_args, BPF_ANY);
-        bpf_tail_call(ctx, &prog_array_tp, TAIL_SEND_BIN_TP);
+        tail_call_send_bin(ctx, &p, &bin_args, TAIL_SEND_BIN_TP);
     }
     return 0;
 }
@@ -3008,18 +3347,42 @@ int BPF_KPROBE(trace_security_bpf)
 
     int cmd = (int) PT_REGS_PARM1(ctx);
 
-    if (should_submit(SECURITY_BPF, &(p.event->context))) {
+    if (should_submit(SECURITY_BPF, p.event)) {
         // 1st argument == cmd (int)
         save_to_submit_buf(p.event, (void *) &cmd, sizeof(int), 0);
-
         events_perf_submit(&p, SECURITY_BPF, 0);
     }
-
     union bpf_attr *attr = (union bpf_attr *) PT_REGS_PARM2(ctx);
 
     reset_event_args(&p);
     check_bpf_link(&p, attr, cmd);
 
+    // Capture BPF object loaded
+    if (cmd == BPF_PROG_LOAD && p.config->options & OPT_CAPTURE_BPF) {
+        bin_args_t bin_args = {};
+        u32 pid = p.task_info->context.host_pid;
+
+        u32 insn_cnt = get_attr_insn_cnt(attr);
+        const struct bpf_insn *insns = get_attr_insns(attr);
+        unsigned int insn_size = (unsigned int) (sizeof(struct bpf_insn) * insn_cnt);
+
+        bin_args.type = SEND_BPF_OBJECT;
+        char prog_name[16] = {0};
+        long sz = bpf_probe_read_str(prog_name, 16, attr->prog_name);
+        if (sz > 0) {
+            sz = bpf_probe_read_str(bin_args.metadata, sz, prog_name);
+        }
+
+        u32 rand = bpf_get_prandom_u32();
+        bpf_probe_read(&bin_args.metadata[16], 4, &rand);
+        bpf_probe_read(&bin_args.metadata[20], 4, &pid);
+        bpf_probe_read(&bin_args.metadata[24], 4, &insn_size);
+        bin_args.ptr = (char *) insns;
+        bin_args.start_off = 0;
+        bin_args.full_size = insn_size;
+
+        tail_call_send_bin(ctx, &p, &bin_args, TAIL_SEND_BIN);
+    }
     return 0;
 }
 
@@ -3082,7 +3445,7 @@ int BPF_KPROBE(trace_security_bpf_map)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_BPF_MAP, &(p.event->context)))
+    if (!should_submit(SECURITY_BPF_MAP, p.event))
         return 0;
 
     struct bpf_map *map = (struct bpf_map *) PT_REGS_PARM1(ctx);
@@ -3109,25 +3472,78 @@ int BPF_KPROBE(trace_security_bpf_prog)
     struct bpf_prog_aux *prog_aux = READ_KERN(prog->aux);
     u32 prog_id = READ_KERN(prog_aux->id);
 
-    bpf_attach_t val = {};
     // In some systems, the 'check_map_func_compatibility' and 'check_helper_call' symbols are not
     // available. For these cases, the temporary map 'bpf_attach_tmp_map' will not hold any
-    // information about the usage of bpf_probe_write_user and bpf_override_return. nevertheless,
-    // we always want to output the 'bpf_attach' event to the user, so using the UNKNOWN values
-    // instead of returning, just so the map would be filled.
-    val.write_user = HELPER_USAGE_UNKNOWN;
-    val.override_return = HELPER_USAGE_UNKNOWN;
+    // information about the used helpers in the prog. nevertheless, we always want to output the
+    // 'bpf_attach' event to the user, so using zero values
+    bpf_used_helpers_t val = {0};
 
-    bpf_attach_t *existing_val;
+    // if there is a value, use it
+    bpf_used_helpers_t *existing_val;
     existing_val = bpf_map_lookup_elem(&bpf_attach_tmp_map, &p.event->context.task.host_tid);
     if (existing_val != NULL) {
-        val.write_user = existing_val->write_user;
-        val.override_return = existing_val->override_return;
+        __builtin_memcpy(&val.helpers, &existing_val->helpers, sizeof(bpf_used_helpers_t));
     }
 
-    bpf_map_update_elem(&bpf_attach_map, &prog_id, &val, BPF_ANY);
-
     bpf_map_delete_elem(&bpf_attach_tmp_map, &p.event->context.task.host_tid);
+
+    if (should_submit(BPF_ATTACH, p.event)) {
+        bpf_map_update_elem(&bpf_attach_map, &prog_id, &val, BPF_ANY);
+    }
+
+    if (!should_submit(SECURITY_BPF_PROG, p.event)) {
+        return 0;
+    }
+
+    bool is_load = false;
+    void **aux_ptr = bpf_map_lookup_elem(&bpf_prog_load_map, &p.event->context.task.host_tid);
+    if (aux_ptr != NULL) {
+        if (*aux_ptr == (void *) prog_aux) {
+            is_load = true;
+        }
+
+        bpf_map_delete_elem(&bpf_prog_load_map, &p.event->context.task.host_tid);
+    }
+
+    int prog_type = READ_KERN(prog->type);
+
+    char prog_name[BPF_OBJ_NAME_LEN];
+    bpf_probe_read_str(&prog_name, BPF_OBJ_NAME_LEN, prog_aux->name);
+
+    save_to_submit_buf(p.event, &prog_type, sizeof(int), 0);
+    save_str_to_buf(p.event, (void *) &prog_name, 1);
+    save_u64_arr_to_buf(p.event, (const u64 *) val.helpers, 4, 2);
+    save_to_submit_buf(p.event, &prog_id, sizeof(u32), 3);
+    save_to_submit_buf(p.event, &is_load, sizeof(bool), 4);
+
+    events_perf_submit(&p, SECURITY_BPF_PROG, 0);
+
+    return 0;
+}
+
+SEC("kprobe/bpf_check")
+int BPF_KPROBE(trace_bpf_check)
+{
+    program_data_t p = {};
+    if (!init_program_data(&p, ctx))
+        return 0;
+
+    if (!should_trace(&p))
+        return 0;
+
+    // this probe is triggered when a bpf program is loaded.
+    // we save the aux pointer to be used in security_bpf_prog, to indicate this prog is being
+    // loaded - security_bpf_prog is triggered not only on prog load.
+
+    if (!should_submit(SECURITY_BPF_PROG, p.event))
+        return 0;
+
+    struct bpf_prog **prog = (struct bpf_prog **) PT_REGS_PARM1(ctx);
+
+    struct bpf_prog *prog_ptr = READ_KERN(*prog);
+    struct bpf_prog_aux *prog_aux = READ_KERN(prog_ptr->aux);
+
+    bpf_map_update_elem(&bpf_prog_load_map, &p.event->context.task.host_tid, &prog_aux, BPF_ANY);
 
     return 0;
 }
@@ -3142,33 +3558,39 @@ int BPF_KPROBE(trace_security_bpf_prog)
 
 static __always_inline int handle_bpf_helper_func_id(u32 host_tid, int func_id)
 {
-    bpf_attach_t val = {};
-    val.write_user = HELPER_USAGE_FALSE;
-    val.override_return = HELPER_USAGE_FALSE;
+    bpf_used_helpers_t val = {0};
 
-    // we want the map to contain value, event if we didn't see the BPF helper functions we looked
-    // for. if there is a value, use it - because this program is invoked for each BPF helper
-    // function.
-    bpf_attach_t *existing_val = bpf_map_lookup_elem(&bpf_attach_tmp_map, &host_tid);
-    if (existing_val == NULL) {
-        bpf_map_update_elem(&bpf_attach_tmp_map, &host_tid, &val, BPF_ANY);
-    } else {
-        val.write_user = existing_val->write_user;
-        val.override_return = existing_val->override_return;
+    // we want to the existing value in the map a just update it with the current func_id
+    bpf_used_helpers_t *existing_val = bpf_map_lookup_elem(&bpf_attach_tmp_map, &host_tid);
+    if (existing_val != NULL) {
+        __builtin_memcpy(&val.helpers, &existing_val->helpers, sizeof(bpf_used_helpers_t));
     }
 
-    // update the map if the BPF helper function is one that we look for
-    switch (func_id) {
-        case BPF_FUNC_probe_write_user:
-            val.write_user = HELPER_USAGE_TRUE;
+    // calculate where to encode usage of this func_id in bpf_used_helpers_t.
+    // this method is used in order to stay in bounds of the helpers array and pass verifier checks.
+    // it is equivalent to:
+    //  val.helpers[func_id / 64] |= (1ULL << (func_id % 64));
+    // which the verifier doesn't like.
+    int arr_num;
+    int arr_idx = func_id;
+
+#pragma unroll
+    for (int i = 0; i < NUM_OF_HELPERS_ELEMS; i++) {
+        arr_num = i;
+        if (arr_idx - SIZE_OF_HELPER_ELEM >= 0) {
+            arr_idx = arr_idx - SIZE_OF_HELPER_ELEM;
+        } else {
             break;
-        case BPF_FUNC_override_return:
-            val.override_return = HELPER_USAGE_TRUE;
-            break;
-        default:
-            return 0;
+        }
+    }
+    if (arr_idx >= SIZE_OF_HELPER_ELEM) {
+        // unsupported func_id
+        return 0;
     }
 
+    val.helpers[arr_num] |= (1ULL << (arr_idx));
+
+    // update the map with the current func_id
     bpf_map_update_elem(&bpf_attach_tmp_map, &host_tid, &val, BPF_ANY);
 
     return 0;
@@ -3221,7 +3643,7 @@ int BPF_KPROBE(trace_security_kernel_read_file)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_KERNEL_READ_FILE, &(p.event->context)))
+    if (!should_submit(SECURITY_KERNEL_READ_FILE, p.event))
         return 0;
 
     struct file *file = (struct file *) PT_REGS_PARM1(ctx);
@@ -3250,18 +3672,13 @@ int BPF_KPROBE(trace_security_kernel_post_read_file)
     if (!should_trace(&p))
         return 0;
 
-    bin_args_t bin_args = {};
-    u64 id = bpf_get_current_pid_tgid();
-
     struct file *file = (struct file *) PT_REGS_PARM1(ctx);
-    u32 pid = p.event->context.task.host_pid;
-
     char *buf = (char *) PT_REGS_PARM2(ctx);
     loff_t size = (loff_t) PT_REGS_PARM3(ctx);
     enum kernel_read_file_id type_id = (enum kernel_read_file_id) PT_REGS_PARM4(ctx);
 
     // Send event if chosen
-    if (should_submit(SECURITY_POST_READ_FILE, &(p.event->context))) {
+    if (should_submit(SECURITY_POST_READ_FILE, p.event)) {
         void *file_path = get_path_str(&file->f_path);
         save_str_to_buf(p.event, file_path, 0);
         save_to_submit_buf(p.event, &size, sizeof(loff_t), 1);
@@ -3270,22 +3687,26 @@ int BPF_KPROBE(trace_security_kernel_post_read_file)
     }
 
     if (p.config->options & OPT_CAPTURE_MODULES) {
+        // Do not extract files greater than 4GB
+        if (size >= (u64) 1 << 32) {
+            return 0;
+        }
         // Extract device id, inode number for file name
         dev_t s_dev = get_dev_from_file(file);
         unsigned long inode_nr = get_inode_nr_from_file(file);
+        bin_args_t bin_args = {};
+        u32 pid = p.event->context.task.host_pid;
 
         bin_args.type = SEND_KERNEL_MODULE;
         bpf_probe_read(bin_args.metadata, 4, &s_dev);
         bpf_probe_read(&bin_args.metadata[4], 8, &inode_nr);
         bpf_probe_read(&bin_args.metadata[12], 4, &pid);
-        bpf_probe_read(&bin_args.metadata[16], 8, &size);
+        bpf_probe_read(&bin_args.metadata[16], 4, &size);
         bin_args.start_off = 0;
         bin_args.ptr = buf;
         bin_args.full_size = size;
-        bpf_map_update_elem(&bin_args_map, &id, &bin_args, BPF_ANY);
 
-        // Send file data
-        bpf_tail_call(ctx, &prog_array, TAIL_SEND_BIN);
+        tail_call_send_bin(ctx, &p, &bin_args, TAIL_SEND_BIN);
     }
 
     return 0;
@@ -3301,7 +3722,7 @@ int BPF_KPROBE(trace_security_inode_mknod)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_INODE_MKNOD, &(p.event->context)))
+    if (!should_submit(SECURITY_INODE_MKNOD, p.event))
         return 0;
 
     struct dentry *dentry = (struct dentry *) PT_REGS_PARM2(ctx);
@@ -3326,7 +3747,7 @@ int BPF_KPROBE(trace_device_add)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(DEVICE_ADD, &(p.event->context)))
+    if (!should_submit(DEVICE_ADD, p.event))
         return 0;
 
     struct device *dev = (struct device *) PT_REGS_PARM1(ctx);
@@ -3361,7 +3782,7 @@ int BPF_KPROBE(trace_ret__register_chrdev)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(REGISTER_CHRDEV, &(p.event->context)))
+    if (!should_submit(REGISTER_CHRDEV, p.event))
         return 0;
 
     unsigned int major_number = (unsigned int) saved_args.args[0];
@@ -3459,7 +3880,7 @@ int BPF_KPROBE(trace_ret_do_splice)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(DIRTY_PIPE_SPLICE, &(p.event->context)))
+    if (!should_submit(DIRTY_PIPE_SPLICE, p.event))
         return 0;
 
     // Catch only successful splice
@@ -3581,7 +4002,7 @@ int BPF_KPROBE(trace_ret_do_init_module)
     program_data_t p = {};
     if (!init_program_data(&p, ctx))
         return 0;
-    if (!should_submit(DO_INIT_MODULE, &(p.event->context)))
+    if (!should_submit(DO_INIT_MODULE, p.event))
         return 0;
 
     kmod_data_t *orig_module_data =
@@ -3644,7 +4065,7 @@ int BPF_KPROBE(trace_load_elf_phdrs)
     proc_info->interpreter.inode = get_inode_nr_from_file(loaded_elf);
     proc_info->interpreter.ctime = get_ctime_nanosec_from_file(loaded_elf);
 
-    if (should_submit(LOAD_ELF_PHDRS, &(p.event->context))) {
+    if (should_submit(LOAD_ELF_PHDRS, p.event)) {
         save_str_to_buf(p.event, (void *) elf_pathname, 0);
         save_to_submit_buf(p.event, &proc_info->interpreter.device, sizeof(dev_t), 1);
         save_to_submit_buf(p.event, &proc_info->interpreter.inode, sizeof(unsigned long), 2);
@@ -3677,7 +4098,7 @@ int BPF_KPROBE(trace_security_file_permission)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(HOOKED_PROC_FOPS, &(p.event->context)))
+    if (!should_submit(HOOKED_PROC_FOPS, p.event))
         return 0;
 
     struct file_operations *fops = (struct file_operations *) READ_KERN(f_inode->i_fop);
@@ -3724,7 +4145,7 @@ int tracepoint__task__task_rename(struct bpf_raw_tracepoint_args *ctx)
     if (!should_trace((&p)))
         return 0;
 
-    if (!should_submit(TASK_RENAME, &(p.event->context)))
+    if (!should_submit(TASK_RENAME, p.event))
         return 0;
 
     struct task_struct *tsk = (struct task_struct *) ctx->args[0];
@@ -3748,15 +4169,15 @@ int BPF_KPROBE(trace_security_inode_rename)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(SECURITY_INODE_RENAME, &(p.event->context)))
+    if (!should_submit(SECURITY_INODE_RENAME, p.event))
         return 0;
 
     struct dentry *old_dentry = (struct dentry *) PT_REGS_PARM2(ctx);
     struct dentry *new_dentry = (struct dentry *) PT_REGS_PARM4(ctx);
 
     void *old_dentry_path = get_dentry_path_str(old_dentry);
-    void *new_dentry_path = get_dentry_path_str(new_dentry);
     save_str_to_buf(p.event, old_dentry_path, 0);
+    void *new_dentry_path = get_dentry_path_str(new_dentry);
     save_str_to_buf(p.event, new_dentry_path, 1);
     return events_perf_submit(&p, SECURITY_INODE_RENAME, 0);
 }
@@ -3779,7 +4200,7 @@ int BPF_KPROBE(trace_ret_kallsyms_lookup_name)
         return 0;
     del_args(KALLSYMS_LOOKUP_NAME);
 
-    if (!should_submit(KALLSYMS_LOOKUP_NAME, &(p.event->context)))
+    if (!should_submit(KALLSYMS_LOOKUP_NAME, p.event))
         return 0;
 
     char *name = (char *) saved_args.args[0];
@@ -3811,7 +4232,7 @@ int BPF_KPROBE(trace_do_sigaction)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(DO_SIGACTION, &(p.event->context)))
+    if (!should_submit(DO_SIGACTION, p.event))
         return 0;
 
     // Initialize all relevant arguments values
@@ -3886,7 +4307,7 @@ static __always_inline int common_utimes(struct pt_regs *ctx)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(VFS_UTIMES, &(p.event->context)))
+    if (!should_submit(VFS_UTIMES, p.event))
         return 0;
 
     struct path *path = (struct path *) PT_REGS_PARM1(ctx);
@@ -3932,7 +4353,7 @@ int BPF_KPROBE(trace_do_truncate)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(DO_TRUNCATE, &(p.event->context)))
+    if (!should_submit(DO_TRUNCATE, p.event))
         return 0;
 
     struct dentry *dentry = (struct dentry *) PT_REGS_PARM2(ctx);
@@ -4009,7 +4430,7 @@ static __always_inline int common_file_modification_ent(struct pt_regs *ctx)
     if (!should_trace(&p))
         return 0;
 
-    if (!should_submit(FILE_MODIFICATION, &(p.event->context)))
+    if (!should_submit(FILE_MODIFICATION, p.event))
         return 0;
 
     struct file *file = (struct file *) PT_REGS_PARM1(ctx);
@@ -4132,6 +4553,137 @@ int BPF_KPROBE(trace_ret_file_modified)
     return 0;
 }
 
+SEC("kprobe/inotify_find_inode")
+TRACE_ENT_FUNC(inotify_find_inode, INOTIFY_WATCH);
+
+SEC("kretprobe/inotify_find_inode")
+int BPF_KPROBE(trace_ret_inotify_find_inode)
+{
+    program_data_t p = {};
+    if (!init_program_data(&p, ctx))
+        return 0;
+
+    args_t saved_args;
+    if (load_args(&saved_args, INOTIFY_WATCH) != 0)
+        return 0;
+    del_args(INOTIFY_WATCH);
+
+    struct path *path = (struct path *) saved_args.args[1];
+
+    void *path_str = get_path_str(path);
+
+    struct dentry *dentry = READ_KERN(path->dentry);
+    u64 inode_nr = get_inode_nr_from_dentry(dentry);
+    dev_t dev = get_dev_from_dentry(dentry);
+
+    save_str_to_buf(p.event, path_str, 0);
+    save_to_submit_buf(p.event, &inode_nr, sizeof(unsigned long), 1);
+    save_to_submit_buf(p.event, &dev, sizeof(dev_t), 2);
+
+    return events_perf_submit(&p, INOTIFY_WATCH, 0);
+}
+
+SEC("kprobe/exec_binprm")
+TRACE_ENT_FUNC(exec_binprm, EXEC_BINPRM);
+
+SEC("kretprobe/exec_binprm")
+int BPF_KPROBE(trace_ret_exec_binprm)
+{
+    args_t saved_args;
+    if (load_args(&saved_args, EXEC_BINPRM) != 0) {
+        // missed entry or not traced
+        return 0;
+    }
+    del_args(EXEC_BINPRM);
+
+    program_data_t p = {};
+    if (!init_program_data(&p, ctx))
+        return 0;
+
+    if (!should_trace(&p))
+        return 0;
+
+    if (!should_submit(PROCESS_EXECUTION_FAILED, p.event))
+        return 0;
+
+    int ret_val = PT_REGS_RC(ctx);
+    if (ret_val == 0)
+        return 0; // not interested of successful execution - for that we have sched_process_exec
+
+    struct linux_binprm *bprm = (struct linux_binprm *) saved_args.args[0];
+    if (bprm == NULL) {
+        return -1;
+    }
+
+    struct file *file = get_file_ptr_from_bprm(bprm);
+
+    const char *path = get_binprm_filename(bprm);
+    save_str_to_buf(p.event, (void *) path, 0);
+
+    void *binary_path = get_path_str(GET_FIELD_ADDR(file->f_path));
+    save_str_to_buf(p.event, binary_path, 1);
+
+    dev_t binary_device_id = get_dev_from_file(file);
+    save_to_submit_buf(p.event, &binary_device_id, sizeof(dev_t), 2);
+
+    unsigned long binary_inode_number = get_inode_nr_from_file(file);
+    save_to_submit_buf(p.event, &binary_inode_number, sizeof(unsigned long), 3);
+
+    u64 binary_ctime = get_ctime_nanosec_from_file(file);
+    save_to_submit_buf(p.event, &binary_ctime, sizeof(u64), 4);
+
+    umode_t binary_inode_mode = get_inode_mode_from_file(file);
+    save_to_submit_buf(p.event, &binary_inode_mode, sizeof(umode_t), 5);
+
+    const char *interpreter_path = get_binprm_interp(bprm);
+    save_str_to_buf(p.event, (void *) interpreter_path, 6);
+
+    bpf_tail_call(ctx, &prog_array, TAIL_EXEC_BINPRM1);
+    return -1;
+}
+
+SEC("kretprobe/trace_ret_exec_binprm1")
+int BPF_KPROBE(trace_ret_exec_binprm1)
+{
+    program_data_t p = {};
+    if (!init_tailcall_program_data(&p, ctx))
+        return -1;
+
+    struct task_struct *task = (struct task_struct *) bpf_get_current_task();
+    struct file *stdin_file = get_struct_file_from_fd(0);
+
+    unsigned short stdin_type = get_inode_mode_from_file(stdin_file) & S_IFMT;
+    save_to_submit_buf(p.event, &stdin_type, sizeof(unsigned short), 7);
+
+    void *stdin_path = get_path_str(GET_FIELD_ADDR(stdin_file->f_path));
+    save_str_to_buf(p.event, stdin_path, 8);
+
+    int kernel_invoked = (get_task_parent_flags(task) & PF_KTHREAD) ? 1 : 0;
+    save_to_submit_buf(p.event, &kernel_invoked, sizeof(int), 9);
+
+    bpf_tail_call(ctx, &prog_array, TAIL_EXEC_BINPRM2);
+    return -1;
+}
+
+SEC("kretprobe/trace_ret_exec_binprm2")
+int BPF_KPROBE(trace_ret_exec_binprm2)
+{
+    program_data_t p = {};
+    if (!init_tailcall_program_data(&p, ctx))
+        return -1;
+
+    syscall_data_t *sys = &p.task_info->syscall_data;
+    save_str_arr_to_buf(p.event, (const char *const *) sys->args.args[1], 10); // userspace argv
+
+    if (p.config->options & OPT_EXEC_ENV) {
+        save_str_arr_to_buf(p.event, (const char *const *) sys->args.args[2], 11); // userspace envp
+    }
+
+    int ret = PT_REGS_RC(ctx); // needs to be int
+
+    return events_perf_submit(&p, PROCESS_EXECUTION_FAILED, ret);
+}
+
 // clang-format off
 
 // Network Packets (works from ~5.2 and beyond)
@@ -4229,7 +4781,7 @@ static __always_inline u64 sizeof_net_event_context_t(void)
 static __always_inline void set_net_task_context(event_data_t *event, net_task_context_t *netctx)
 {
     netctx->task = event->task;
-    netctx->matched_scopes = event->context.matched_scopes;
+    netctx->matched_policies = event->context.matched_policies;
     netctx->syscall = event->context.syscall;
     __builtin_memset(&netctx->taskctx, 0, sizeof(task_context_t));
     __builtin_memcpy(&netctx->taskctx, &event->context.task, sizeof(task_context_t));
@@ -4265,7 +4817,7 @@ static __always_inline int should_submit_net_event(net_event_context_t *netevent
     if (neteventctx->md.submit & packet_type)
         return 1;
 
-    if (should_submit(net_packet_to_net_event(packet_type), &(neteventctx->eventctx))) {
+    if (should_submit_by_ctx(net_packet_to_net_event(packet_type), &(neteventctx->eventctx))) {
         neteventctx->md.submit |= packet_type;
         // done, result cached for later.
         return 1;
@@ -4595,7 +5147,7 @@ int BPF_KPROBE(cgroup_bpf_run_filter_skb)
     eventctx->eventid = NET_PACKET_IP;                      // will be changed in skb program
     eventctx->stack_id = 0;                                 // no stack trace
     eventctx->processor_id = p.event->context.processor_id; // copy from current ctx
-    eventctx->matched_scopes = netctx->matched_scopes;      // pick matched-scopes from net ctx
+    eventctx->matched_policies = netctx->matched_policies;  // pick matched_policies from net ctx
     eventctx->syscall = NO_SYSCALL;                         // ingress has no orig syscall
     if (type == BPF_CGROUP_INET_EGRESS)
         eventctx->syscall = netctx->syscall; // egress does have an orig syscall

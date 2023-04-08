@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"github.com/aquasecurity/tracee/pkg/bufferdecoder"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/pkg/utils"
@@ -72,7 +73,9 @@ func (t *Tracee) handleEvents(ctx context.Context) {
 	errcList = append(errcList, errc)
 
 	// Pipeline started. Waiting for pipeline to complete
-	t.WaitForPipeline(errcList...)
+	if err := t.WaitForPipeline(errcList...); err != nil {
+		logger.Errorw("Pipeline", "error", err)
+	}
 }
 
 // Under some circumstances, tracee-rules might be slower to consume events
@@ -157,7 +160,7 @@ func (t *Tracee) decodeEvents(outerCtx context.Context, sourceChan chan []byte) 
 			eventId := events.ID(ctx.EventID)
 			eventDefinition, ok := events.Definitions.GetSafe(eventId)
 			if !ok {
-				t.handleError(logger.NewErrorf("failed to get configuration of event %d", eventId))
+				t.handleError(errfmt.Errorf("failed to get configuration of event %d", eventId))
 				continue
 			}
 
@@ -169,11 +172,11 @@ func (t *Tracee) decodeEvents(outerCtx context.Context, sourceChan chan []byte) 
 					eventDefinition.Params,
 				)
 				if err != nil {
-					t.handleError(logger.NewErrorf("failed to read argument %d of event %s: %v", i, eventDefinition.Name, err))
+					t.handleError(errfmt.Errorf("failed to read argument %d of event %s: %v", i, eventDefinition.Name, err))
 					continue
 				}
 				if args[idx].Value != nil {
-					t.handleError(logger.NewErrorf("read more than one instance of argument %s of event %s. Saved value: %v. New value: %v", arg.Name, eventDefinition.Name, args[idx].Value, arg.Value))
+					t.handleError(errfmt.Errorf("read more than one instance of argument %s of event %s. Saved value: %v. New value: %v", arg.Name, eventDefinition.Name, args[idx].Value, arg.Value))
 				}
 				args[idx] = arg
 			}
@@ -204,6 +207,17 @@ func (t *Tracee) decodeEvents(outerCtx context.Context, sourceChan chan []byte) 
 			}
 
 			containerInfo := t.containers.GetCgroupInfo(ctx.CgroupID).Container
+			containerData := trace.Container{
+				ID:          containerInfo.ContainerId,
+				ImageName:   containerInfo.Image,
+				ImageDigest: containerInfo.ImageDigest,
+				Name:        containerInfo.Name,
+			}
+			kubernetesData := trace.Kubernetes{
+				PodName:      containerInfo.Pod.Name,
+				PodNamespace: containerInfo.Pod.Namespace,
+				PodUID:       containerInfo.Pod.UID,
+			}
 
 			flags := parseContextFlags(ctx.Flags)
 			syscall := ""
@@ -211,7 +225,7 @@ func (t *Tracee) decodeEvents(outerCtx context.Context, sourceChan chan []byte) 
 				var err error
 				syscall, err = parseSyscallID(int(ctx.Syscall), flags.IsCompat, sysCompatTranslation)
 				if err != nil {
-					logger.Debug("Originated syscall parsing", "error", err)
+					logger.Debugw("Originated syscall parsing", "error", err)
 				}
 			}
 
@@ -231,16 +245,11 @@ func (t *Tracee) decodeEvents(outerCtx context.Context, sourceChan chan []byte) 
 				ProcessName:         string(bytes.TrimRight(ctx.Comm[:], "\x00")),
 				HostName:            string(bytes.TrimRight(ctx.UtsName[:], "\x00")),
 				CgroupID:            uint(ctx.CgroupID),
-				ContainerID:         containerInfo.ContainerId,
-				ContainerImage:      containerInfo.Image,
-				ContainerName:       containerInfo.Name,
-				PodName:             containerInfo.Pod.Name,
-				PodNamespace:        containerInfo.Pod.Namespace,
-				PodUID:              containerInfo.Pod.UID,
-				PodSandbox:          containerInfo.Pod.Sandbox,
+				Container:           containerData,
+				Kubernetes:          kubernetesData,
 				EventID:             int(ctx.EventID),
 				EventName:           eventDefinition.Name,
-				MatchedScopes:       ctx.MatchedScopes,
+				MatchedPolicies:     ctx.MatchedPolicies,
 				ArgsNum:             int(ctx.Argnum),
 				ReturnValue:         int(ctx.Retval),
 				Args:                args,
@@ -249,10 +258,11 @@ func (t *Tracee) decodeEvents(outerCtx context.Context, sourceChan chan []byte) 
 				Syscall:             syscall,
 			}
 
-			// base events for derived ones should be filtered in later stage
-			if _, ok := t.eventDerivations[eventId]; !ok {
-				if !t.shouldProcessEvent(&evt) {
-					t.stats.EventsFiltered.Increment()
+			if !t.shouldProcessEvent(&evt) {
+				_ = t.stats.EventsFiltered.Increment()
+				// we can stop processing the event if it doesn't have derivatives.
+				// otherwise, since it has MatchedPolicies==0 it won't be emitted later anyway.
+				if _, ok := t.eventDerivations[eventId]; !ok {
 					continue
 				}
 			}
@@ -267,40 +277,40 @@ func (t *Tracee) decodeEvents(outerCtx context.Context, sourceChan chan []byte) 
 	return out, errc
 }
 
-// computeScopes iterates through the scopes that do the filtering in user space, checking whether an event should be considered.
+// computePolicies iterates through the policies that do the filtering in user space, checking whether an event should be considered.
 // If it should not, it sets the respective offset to 0.
-// Finally it returns the bitmask of computed scopes.
-func (t *Tracee) computeScopes(event *trace.Event) uint64 {
+// Finally it returns computed policies and the names of the policies that matched.
+func (t *Tracee) computePolicies(event *trace.Event) (uint64, []string) {
 	eventID := events.ID(event.EventID)
-	origMatchedScopes := event.MatchedScopes
-	matchedScopes := event.MatchedScopes
+	matchedPolicies := event.MatchedPolicies
+	matchedPoliciesNames := []string{}
 
-	for filterScope := range t.config.FilterScopes.Map() {
-		bitOffset := uint(filterScope.ID)
+	for p := range t.config.Policies.Map() {
+		bitOffset := uint(p.ID)
 
-		// Events submitted with matching scopes.
-		// The scope must have its bit cleared when it does not match.
-		if !utils.HasBit(origMatchedScopes, bitOffset) {
+		// Events submitted with matching policies.
+		// The policy must have its bit cleared when it does not match.
+		if !utils.HasBit(matchedPolicies, bitOffset) {
 			continue
 		}
 
-		if !filterScope.ContextFilter.Filter(*event) {
-			utils.ClearBit(&matchedScopes, bitOffset)
+		if !p.ContextFilter.Filter(*event) {
+			utils.ClearBit(&matchedPolicies, bitOffset)
 			continue
 		}
 
-		if !filterScope.RetFilter.Filter(eventID, int64(event.ReturnValue)) {
-			utils.ClearBit(&matchedScopes, bitOffset)
+		if !p.RetFilter.Filter(eventID, int64(event.ReturnValue)) {
+			utils.ClearBit(&matchedPolicies, bitOffset)
 			continue
 		}
 
-		if !filterScope.ArgFilter.Filter(eventID, event.Args) {
-			utils.ClearBit(&matchedScopes, bitOffset)
+		if !p.ArgFilter.Filter(eventID, event.Args) {
+			utils.ClearBit(&matchedPolicies, bitOffset)
 			continue
 		}
 
-		// An event with a matched scope for global min/max range might not match
-		// all scopes with UID and PID filters with different min/max ranges.
+		// An event with a matched policy for global min/max range might not match
+		// all policies with UID and PID filters with different min/max ranges.
 		//
 		// e.g.: -f 59:comm=who -f '59:pid>100' -f '59:pid<1257738' \
 		//       -f 30:comm=who -f '30:pid>502000' -f '30:pid<505000'
@@ -310,29 +320,32 @@ func (t *Tracee) computeScopes(event *trace.Event) uint64 {
 		// pid_max = 1257738
 		// pid_min = 100
 		//
-		// So a who command with pid 150 is a match only for the scope 59
+		// So a who command with pid 150 is a match only for the policy 59
 
-		if filterScope.UIDFilter.Enabled() &&
-			!filterScope.UIDFilter.InMinMaxRange(uint32(event.UserID)) {
-			utils.ClearBit(&matchedScopes, bitOffset)
+		if p.UIDFilter.Enabled() &&
+			!p.UIDFilter.InMinMaxRange(uint32(event.UserID)) {
+			utils.ClearBit(&matchedPolicies, bitOffset)
 			continue
 		}
 
-		if filterScope.PIDFilter.Enabled() &&
-			!filterScope.PIDFilter.InMinMaxRange(uint32(event.HostProcessID)) {
-			utils.ClearBit(&matchedScopes, bitOffset)
+		if p.PIDFilter.Enabled() &&
+			!p.PIDFilter.InMinMaxRange(uint32(event.HostProcessID)) {
+			utils.ClearBit(&matchedPolicies, bitOffset)
 			continue
 		}
+
+		// as we reached here, the policy matched
+		matchedPoliciesNames = append(matchedPoliciesNames, p.Name)
 	}
 
-	return matchedScopes
+	return matchedPolicies, matchedPoliciesNames
 }
 
 // shouldProcessEvent decides whether or not to drop an event before further processing it
 func (t *Tracee) shouldProcessEvent(event *trace.Event) bool {
-	// As we don't do all the filtering on the ebpf side, we have to update MatchedScopes
-	event.MatchedScopes = t.computeScopes(event)
-	return event.MatchedScopes != 0
+	// As we don't do all the filtering on the ebpf side, we have to update MatchedPolicies
+	event.MatchedPolicies, event.MatchedPoliciesNames = t.computePolicies(event)
+	return event.MatchedPolicies != 0
 }
 
 func parseContextFlags(flags uint32) trace.ContextFlags {
@@ -353,7 +366,7 @@ func parseSyscallID(syscallID int, isCompat bool, compatTranslationMap map[event
 		if ok {
 			return def.Name, nil
 		} else {
-			return "", logger.NewErrorf("no syscall event with syscall id %d", syscallID)
+			return "", errfmt.Errorf("no syscall event with syscall id %d", syscallID)
 		}
 	} else {
 		id, ok := compatTranslationMap[events.ID(syscallID)]
@@ -362,10 +375,10 @@ func parseSyscallID(syscallID int, isCompat bool, compatTranslationMap map[event
 			if ok {
 				return def.Name, nil
 			} else { // Should never happen, as the translation map should be initialized from events.Definition
-				return "", logger.NewErrorf("no syscall event with compat syscall id %d, translated to ID %d", syscallID, id)
+				return "", errfmt.Errorf("no syscall event with compat syscall id %d, translated to ID %d", syscallID, id)
 			}
 		} else {
-			return "", logger.NewErrorf("no syscall event with compat syscall id %d", syscallID)
+			return "", errfmt.Errorf("no syscall event with compat syscall id %d", syscallID)
 		}
 	}
 }
@@ -386,8 +399,8 @@ func (t *Tracee) processEvents(ctx context.Context, in <-chan *trace.Event) (<-c
 			}
 
 			// store the atomic read
-			scopesWithContainerFilter := t.config.FilterScopes.ContainerFilterEnabled()
-			if scopesWithContainerFilter > 0 && event.ContainerID == "" {
+			policiesWithContainerFilter := t.config.Policies.ContainerFilterEnabled()
+			if policiesWithContainerFilter > 0 && event.Container.ID == "" {
 				// Don't trace false container positives -
 				// a container filter is set by the user, but this event wasn't originated in a container.
 				// Although kernel filters shouldn't submit such events, we do this check to be on the safe side.
@@ -397,11 +410,11 @@ func (t *Tracee) processEvents(ctx context.Context, in <-chan *trace.Event) (<-c
 
 				// don't skip cgroup_mkdir and cgroup_rmdir so we can derive container_create and container_remove events
 				if eventId != events.CgroupMkdir && eventId != events.CgroupRmdir {
-					logger.Debug("false container positive", "event.Timestamp", event.Timestamp, "eventId", eventId)
+					logger.Debugw("False container positive", "event.Timestamp", event.Timestamp, "eventId", eventId)
 
-					// filter container scopes out
-					utils.ClearBits(&event.MatchedScopes, scopesWithContainerFilter)
-					if event.MatchedScopes == 0 {
+					// filter container policies out
+					utils.ClearBits(&event.MatchedPolicies, policiesWithContainerFilter)
+					if event.MatchedPolicies == 0 {
 						continue
 					}
 				}
@@ -431,9 +444,13 @@ func (t *Tracee) deriveEvents(ctx context.Context, in <-chan *trace.Event) (
 		for {
 			select {
 			case event := <-in:
+				if event == nil {
+					continue // might happen during initialization (ctrl+c seg faults)
+				}
+
 				// Get a copy of our event before sending it down the pipeline.
 				// This is needed because later modification of the event (in
-				// particular of the matched scopes) can affect the derivation
+				// particular of the matched policies) can affect the derivation
 				// and later pipeline logic acting on the derived event.
 				eventCopy := *event
 				out <- event
@@ -485,8 +502,8 @@ func (t *Tracee) sinkEvents(ctx context.Context, in <-chan *trace.Event) <-chan 
 		for event := range in {
 			// Only emit events requested by the user
 			id := events.ID(event.EventID)
-			event.MatchedScopes &= t.events[id].emit
-			if event.MatchedScopes == 0 {
+			event.MatchedPolicies &= t.events[id].emit
+			if event.MatchedPolicies == 0 {
 				continue
 			}
 
@@ -501,7 +518,7 @@ func (t *Tracee) sinkEvents(ctx context.Context, in <-chan *trace.Event) <-chan 
 
 			select {
 			case t.config.ChanEvents <- *event:
-				t.stats.EventCount.Increment()
+				_ = t.stats.EventCount.Increment()
 				event = nil
 			case <-ctx.Done():
 				return
@@ -583,8 +600,8 @@ func MergeErrors(cs ...<-chan error) <-chan error {
 }
 
 func (t *Tracee) handleError(err error) {
-	t.stats.ErrorCount.Increment()
-	logger.Error("tracee encountered an error", "error", err)
+	_ = t.stats.ErrorCount.Increment()
+	logger.Errorw("Tracee encountered an error", "error", err)
 }
 
 // parseArguments must happen before signatures are evaluated.
@@ -594,7 +611,7 @@ func (t *Tracee) parseArguments(e *trace.Event) error {
 	if t.config.Output.ParseArguments {
 		err := events.ParseArgs(e)
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 		if t.config.Output.ParseArgumentsFDs {
 			return events.ParseArgsFDs(e, t.FDArgPathMap)

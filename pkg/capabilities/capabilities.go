@@ -7,8 +7,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aquasecurity/tracee/pkg/logger"
 	"kernel.org/pub/linux/libs/security/libcap/cap"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
+	"github.com/aquasecurity/tracee/pkg/logger"
 )
 
 var once sync.Once
@@ -45,7 +47,7 @@ func Initialize(bypass bool) error {
 		err = caps.initialize(bypass)
 	})
 
-	return logger.ErrorFunc(err)
+	return errfmt.WrapError(err)
 }
 
 // GetInstance returns current "caps" instance. It initializes capabilities if
@@ -78,24 +80,30 @@ func (c *Capabilities) initialize(bypass bool) error {
 
 	err := c.getProc()
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 
 	for c := range c.all {
-		cap.DropBound(c) // drop all capabilities from bound
+		err = cap.DropBound(c) // drop all capabilities from bound
+		if err != nil {
+			logger.Debugw("Dropping capability from bound", "cap", c, "error", err)
+		}
 	}
 
 	err = c.setProc()
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 
 	// The base for required capabilities (ring1) depends on the following:
 
-	c.Require(
+	err = c.Require(
 		cap.IPC_LOCK,
 		cap.SYS_RESOURCE,
 	)
+	if err != nil {
+		logger.Fatalw("Requiring capabilities", "error", err)
+	}
 
 	// Kernels bellow v5.8 do not support cap.BPF + cap.PERFMON (instead of
 	// having to have cap.SYS_ADMIN), nevertheless, some kernels, like RHEL8
@@ -103,26 +111,35 @@ func (c *Capabilities) initialize(bypass bool) error {
 
 	paranoid, err := getKernelPerfEventParanoidValue()
 	if err != nil {
-		logger.Debug("could not get perf_event_paranoid, assuming highest")
+		logger.Debugw("Could not get perf_event_paranoid, assuming highest", "error", err)
 	}
 
 	if paranoid > 2 {
-		logger.Debug("paranoid: Value in /proc/sys/kernel/perf_event_paranoid is > 2")
-		logger.Debug("paranoid: Tracee needs CAP_SYS_ADMIN instead of CAP_BPF + CAP_PERFMON")
-		logger.Debug("paranoid: To change that behavior set perf_event_paranoid to 2 or less.")
-		c.Require(cap.SYS_ADMIN)
+		logger.Debugw("Paranoid: Value in /proc/sys/kernel/perf_event_paranoid is > 2")
+		logger.Debugw("Paranoid: Tracee needs CAP_SYS_ADMIN instead of CAP_BPF + CAP_PERFMON")
+		logger.Debugw("Paranoid: To change that behavior set perf_event_paranoid to 2 or less.")
+		err = c.Require(cap.SYS_ADMIN)
+		if err != nil {
+			logger.Fatalw("Requiring capabilities", "error", err)
+		}
 	}
 
 	hasBPF, _ := c.have.GetFlag(cap.Permitted, cap.BPF)
 	if hasBPF {
-		c.Require(
+		err = c.Require(
 			cap.BPF,
 			cap.PERFMON,
 		)
+		if err != nil {
+			logger.Fatalw("Requiring capabilities", "error", err)
+		}
 	} else {
-		c.Require(
+		err = c.Require(
 			cap.SYS_ADMIN,
 		)
+		if err != nil {
+			logger.Fatalw("Requiring capabilities", "error", err)
+		}
 	}
 
 	return c.apply(Unprivileged) // ring3 as effective
@@ -140,7 +157,7 @@ func (c *Capabilities) Privileged(cb func() error) error {
 
 		err = c.apply(Privileged) // ring0 as effective for callback exec
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
@@ -149,7 +166,7 @@ func (c *Capabilities) Privileged(cb func() error) error {
 	if !c.bypass {
 		err = c.apply(Unprivileged) // back to ring3
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
@@ -166,7 +183,7 @@ func (c *Capabilities) Required(cb func() error) error {
 
 		err = c.apply(Required) // ring1 as effective
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
@@ -175,7 +192,7 @@ func (c *Capabilities) Required(cb func() error) error {
 	if !c.bypass {
 		err = c.apply(Unprivileged) // back to ring3
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
@@ -196,27 +213,27 @@ func (c *Capabilities) Requested(cb func() error, values ...cap.Value) error {
 
 		err = c.set(Requested, values...)
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 		err = c.apply(Requested) // ring2 as effective
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 		err = c.unset(Requested, values...) // clean requested (for next calls)
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
 	errCb := cb()
 	if errCb != nil {
-		logger.Debug("caps Requested cb func", "error", errCb)
+		logger.Debugw("Caps Requested cb func", "error", errCb)
 	}
 
 	if !c.bypass {
 		err = c.apply(Unprivileged)
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
@@ -239,7 +256,7 @@ func (c *Capabilities) Require(values ...cap.Value) error {
 	err = c.set(Required, values...) // populate ring1 (Required)
 	c.lock.Unlock()
 
-	return logger.ErrorFunc(err)
+	return errfmt.WrapError(err)
 }
 
 // Unrequire is only called when command line "capabilities drop=X" is given.
@@ -257,7 +274,7 @@ func (c *Capabilities) Unrequire(values ...cap.Value) error {
 	err = c.unset(Required, values...) // unpopulate ring1 (Required)
 	c.lock.Unlock()
 
-	return logger.ErrorFunc(err)
+	return errfmt.WrapError(err)
 }
 
 // Private Methods
@@ -303,18 +320,18 @@ func (c *Capabilities) apply(t ringType) error {
 
 	err = c.getProc()
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 
-	logger.Debug("capabilities change")
+	logger.Debugw("Capabilities change")
 
 	for k, v := range c.all {
 		if v[t] {
-			logger.Debug("enabling cap", "cap", k)
+			logger.Debugw("Enabling cap", "cap", k)
 		}
 		err = c.have.SetFlag(cap.Effective, v[t], k)
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 

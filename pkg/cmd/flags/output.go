@@ -10,7 +10,7 @@ import (
 
 	"github.com/aquasecurity/tracee/pkg/cmd/printer"
 	tracee "github.com/aquasecurity/tracee/pkg/ebpf"
-	"github.com/aquasecurity/tracee/pkg/logger"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 )
 
 func outputHelp() string {
@@ -29,9 +29,6 @@ forward:url                                        send events in json format us
 Webhook options:
 webhook:url                                        send events in json format to the webhook url
 
-Log options:
-log-file:/path/to/file                             write the logs to a specified file. create/trim the file if exists (default: stderr)
-
 Other options:
 option:{stack-addresses,exec-env,relative-time,exec-hash,parse-arguments,sort-events}
                                                    augment output according to given options (default: none)
@@ -47,7 +44,7 @@ Examples:
   --output json                                                  | output as json to stdout
   --output json:/my/out                                          | output as json to /my/out
   --output gotemplate=/path/to/my.tmpl                           | output as the provided go template to stdout
-  --output gob:/my/out --output log-file:/my/log                 | output gob to /my/out and logs to /my/log
+  --output gob:/my/out                                           | output gob to /my/out
   --output json --output gob:/my/out                             | output as json to stdout and as gob to /my/out
   --output json:/my/out1,/my/out2                                | output as json to both /my/out and /my/out2
   --output none                                                  | ignore events output
@@ -63,14 +60,11 @@ Use this flag multiple times to choose multiple output options
 type OutputConfig struct {
 	TraceeConfig   *tracee.OutputConfig
 	PrinterConfigs []printer.Config
-	LogFile        *os.File
 }
 
 func PrepareOutput(outputSlice []string) (OutputConfig, error) {
 	outConfig := OutputConfig{}
 	traceeConfig := &tracee.OutputConfig{}
-
-	var logPath string
 
 	//outpath:format
 	printerMap := make(map[string]string)
@@ -111,12 +105,6 @@ func PrepareOutput(outputSlice []string) (OutputConfig, error) {
 			}
 
 			printerMap[outputParts[1]] = "webhook"
-		case "log-file":
-			err := validateLogfile(outputParts)
-			if err != nil {
-				return outConfig, err
-			}
-			logPath = outputParts[1]
 		case "option":
 			err := parseOption(outputParts, traceeConfig)
 			if err != nil {
@@ -135,17 +123,6 @@ func PrepareOutput(outputSlice []string) (OutputConfig, error) {
 	printerConfigs, err := getPrinterConfigs(printerMap, traceeConfig)
 	if err != nil {
 		return outConfig, err
-	}
-
-	if logPath == "" {
-		outConfig.LogFile = os.Stderr
-	} else {
-		file, err := createFile(logPath)
-		if err != nil {
-			return outConfig, err
-		}
-
-		outConfig.LogFile = file
 	}
 
 	outConfig.TraceeConfig = traceeConfig
@@ -173,7 +150,7 @@ func setOption(config *tracee.OutputConfig, option string) error {
 	case "sort-events":
 		config.EventsSorting = true
 	default:
-		return logger.NewErrorf("invalid output option: %s, use '--output help' for more info", option)
+		return errfmt.Errorf("invalid output option: %s, use '--output help' for more info", option)
 	}
 
 	return nil
@@ -185,7 +162,9 @@ func getPrinterConfigs(printerMap map[string]string, traceeConfig *tracee.Output
 
 	for outPath, printerKind := range printerMap {
 		if printerKind == "table" {
-			setOption(traceeConfig, "parse-arguments")
+			if err := setOption(traceeConfig, "parse-arguments"); err != nil {
+				return nil, err
+			}
 		}
 
 		outFile := os.Stdout
@@ -219,11 +198,11 @@ func parseFormat(outputParts []string, printerMap map[string]string) error {
 	for _, outPath := range strings.Split(outputParts[1], ",") {
 
 		if outPath == "" {
-			return logger.NewErrorf("format flag can't be empty, use '--output help' for more info")
+			return errfmt.Errorf("format flag can't be empty, use '--output help' for more info")
 		}
 
 		if _, ok := printerMap[outPath]; ok {
-			return logger.NewErrorf("cannot use the same path for multiple outputs: %s, use '--output help' for more info", outPath)
+			return errfmt.Errorf("cannot use the same path for multiple outputs: %s, use '--output help' for more info", outPath)
 		}
 		printerMap[outPath] = outputParts[0]
 	}
@@ -234,7 +213,7 @@ func parseFormat(outputParts []string, printerMap map[string]string) error {
 // parseOption parses the given option and sets it in the given config
 func parseOption(outputParts []string, traceeConfig *tracee.OutputConfig) error {
 	if len(outputParts) == 1 || outputParts[1] == "" {
-		return logger.NewErrorf("option flag can't be empty, use '--output help' for more info")
+		return errfmt.Errorf("option flag can't be empty, use '--output help' for more info")
 	}
 
 	for _, option := range strings.Split(outputParts[1], ",") {
@@ -247,27 +226,20 @@ func parseOption(outputParts []string, traceeConfig *tracee.OutputConfig) error 
 	return nil
 }
 
-// validateLogfile validates the given logfile
-func validateLogfile(outputParts []string) error {
-	if len(outputParts) == 1 || outputParts[1] == "" {
-		return logger.NewErrorf("log-file flag can't be empty, use '--output help' for more info")
-	}
-
-	return nil
-}
-
 // creates *os.File for the given path
 func createFile(path string) (*os.File, error) {
 	fileInfo, err := os.Stat(path)
 	if err == nil && fileInfo.IsDir() {
-		return nil, logger.NewErrorf("cannot use a path of existing directory %s", path)
+		return nil, errfmt.Errorf("cannot use a path of existing directory %s", path)
 	}
 
 	dir := filepath.Dir(path)
-	os.MkdirAll(dir, 0755)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, errfmt.Errorf("failed to create directory: %v", err)
+	}
 	file, err := os.Create(path)
 	if err != nil {
-		return nil, logger.NewErrorf("failed to create output path: %v", err)
+		return nil, errfmt.Errorf("failed to create output path: %v", err)
 	}
 
 	return file, nil
@@ -277,13 +249,13 @@ func createFile(path string) (*os.File, error) {
 // --output [webhook|forward]:[protocol://user:pass@]host:port[?k=v#f]
 func validateURL(outputParts []string, flag string) error {
 	if len(outputParts) == 1 || outputParts[1] == "" {
-		return logger.NewErrorf("%s flag can't be empty, use '--output help' for more info", flag)
+		return errfmt.Errorf("%s flag can't be empty, use '--output help' for more info", flag)
 	}
 	// Now parse our URL using the standard library and report any errors from basic parsing.
 	_, err := url.ParseRequestURI(outputParts[1])
 
 	if err != nil {
-		return logger.NewErrorf("invalid uri for %s output %q. Use '--output help' for more info", flag, outputParts[1])
+		return errfmt.Errorf("invalid uri for %s output %q. Use '--output help' for more info", flag, outputParts[1])
 	}
 
 	return nil

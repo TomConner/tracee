@@ -3,11 +3,12 @@ package trigger_test
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	"gotest.tools/assert"
+
 	"github.com/aquasecurity/tracee/pkg/events"
 	"github.com/aquasecurity/tracee/pkg/events/trigger"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/stretchr/testify/require"
-	"gotest.tools/assert"
 )
 
 func TestContext_Apply(t *testing.T) {
@@ -19,13 +20,13 @@ func TestContext_Apply(t *testing.T) {
 		expectedError error
 	}{
 		{
-			name: "happy path - succesful apply",
+			name: "happy path - successful apply",
 			invokingEvent: trace.Event{
 				EventID:     int(events.Open),
 				EventName:   "open",
 				Timestamp:   123,
 				ProcessID:   5,
-				ContainerID: "abc123",
+				Container:   trace.Container{ID: "abc123"},
 				ProcessName: "insmod",
 				ReturnValue: 2,
 			},
@@ -35,7 +36,7 @@ func TestContext_Apply(t *testing.T) {
 				Timestamp:   187,
 				ProcessID:   0,
 				ArgsNum:     3,
-				ContainerID: "",
+				Container:   trace.Container{ID: ""},
 				ProcessName: "tracee-ebpf",
 				Args: []trace.Argument{
 					{
@@ -67,7 +68,7 @@ func TestContext_Apply(t *testing.T) {
 				Timestamp:   123,
 				ProcessID:   5,
 				ReturnValue: 0,
-				ContainerID: "abc123",
+				Container:   trace.Container{ID: "abc123"},
 				ProcessName: "insmod",
 				ArgsNum:     3,
 				Args: []trace.Argument{

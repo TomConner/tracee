@@ -10,12 +10,14 @@ import (
 	"unsafe"
 
 	bpf "github.com/aquasecurity/libbpfgo"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/pkg/utils"
 )
 
 type ProcessTreeFilter struct {
-	PIDs    map[uint32]bool // PIDs is a map where k=pid and v represents whether it and its descendents should be traced or not
+	PIDs    map[uint32]bool // PIDs is a map where k=pid and v represents whether it and its descendent should be traced or not
 	enabled bool
 	mapName string
 }
@@ -56,7 +58,7 @@ func (filter *ProcessTreeFilter) Parse(operatorAndValues string) error {
 	} else if strings.HasPrefix(operatorAndValues, "!=") {
 		valuesString = operatorAndValues[2:]
 		if len(valuesString) == 0 {
-			return logger.NewErrorf("no value passed with operator in process tree filter")
+			return errfmt.Errorf("no value passed with operator in process tree filter")
 		}
 		equalityOperator = false
 	} else {
@@ -67,7 +69,7 @@ func (filter *ProcessTreeFilter) Parse(operatorAndValues string) error {
 	for _, value := range values {
 		pid, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
-			return logger.NewErrorf("invalid PID given to filter: %s", valuesString)
+			return errfmt.Errorf("invalid PID given to filter: %s", valuesString)
 		}
 		filter.PIDs[uint32(pid)] = equalityOperator
 	}
@@ -77,46 +79,53 @@ func (filter *ProcessTreeFilter) Parse(operatorAndValues string) error {
 	return nil
 }
 
-func (filter *ProcessTreeFilter) UpdateBPF(bpfModule *bpf.Module, filterScopeID uint) error {
+func (filter *ProcessTreeFilter) UpdateBPF(bpfModule *bpf.Module, policyID uint) error {
 	if !filter.Enabled() {
 		return nil
 	}
 
 	processTreeBPFMap, err := bpfModule.GetMap(filter.mapName)
 	if err != nil {
-		return logger.NewErrorf("could not find bpf process_tree_map: %v", err)
+		return errfmt.Errorf("could not find bpf process_tree_map: %v", err)
 	}
 
 	procDir, err := os.Open("/proc")
 	if err != nil {
-		return logger.NewErrorf("could not open proc dir: %v", err)
+		return errfmt.Errorf("could not open proc dir: %v", err)
 	}
-	defer procDir.Close()
+	defer func() {
+		if err := procDir.Close(); err != nil {
+			logger.Errorw("Closing file", "error", err)
+		}
+	}()
 
 	entries, err := procDir.Readdirnames(-1)
 	if err != nil {
-		return logger.NewErrorf("could not read proc dir: %v", err)
+		return errfmt.Errorf("could not read proc dir: %v", err)
 	}
 
 	updateBPF := func(shouldBeTraced bool, pid uint64) {
 		filterVal := make([]byte, 16)
-		var equalInScopes, equalitySetInScopes uint64
+		var equalInPolicies, equalitySetInPolicies uint64
 		curVal, err := processTreeBPFMap.GetValue(unsafe.Pointer(&pid))
 		if err == nil {
-			equalInScopes = binary.LittleEndian.Uint64(curVal[0:8])
-			equalitySetInScopes = binary.LittleEndian.Uint64(curVal[8:16])
+			equalInPolicies = binary.LittleEndian.Uint64(curVal[0:8])
+			equalitySetInPolicies = binary.LittleEndian.Uint64(curVal[8:16])
 		}
 
 		if shouldBeTraced {
-			utils.SetBit(&equalInScopes, filterScopeID)
+			utils.SetBit(&equalInPolicies, policyID)
 		} else {
-			utils.ClearBit(&equalInScopes, filterScopeID)
+			utils.ClearBit(&equalInPolicies, policyID)
 		}
-		utils.SetBit(&equalitySetInScopes, filterScopeID)
+		utils.SetBit(&equalitySetInPolicies, policyID)
 
-		binary.LittleEndian.PutUint64(filterVal[0:8], equalInScopes)
-		binary.LittleEndian.PutUint64(filterVal[8:16], equalitySetInScopes)
-		processTreeBPFMap.Update(unsafe.Pointer(&pid), unsafe.Pointer(&filterVal[0]))
+		binary.LittleEndian.PutUint64(filterVal[0:8], equalInPolicies)
+		binary.LittleEndian.PutUint64(filterVal[8:16], equalitySetInPolicies)
+		err = processTreeBPFMap.Update(unsafe.Pointer(&pid), unsafe.Pointer(&filterVal[0]))
+		if err != nil {
+			logger.Errorw("Updating processTreeBPFMap", "error", err)
+		}
 	}
 
 	// Iterate over each pid

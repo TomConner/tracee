@@ -10,23 +10,23 @@ Tracee uses eBPF technology to tap into your system and give you access to hundr
 In addition to basic observability events about system activity, Tracee adds a collection of sophisticated security events that expose more advanced behavioral patterns. You can also easily add your own events using the popular [Rego](https://www.openpolicyagent.org/docs/latest/policy-language/) language.
 Tracee provides a rich filtering mechanism that allows you to eliminate noise and focus on specific workloads that matter most to you.
 
-To learn more about Tracee, check out the [documentation](https://aquasecurity.github.io/tracee/).
+To learn more about Tracee, check out the [documentation](https://aquasecurity.github.io/tracee).
 
 ## Quickstart
 
 You can easily start experimenting with Tracee using the Docker image as follows:
 
-```shell
+```console
 docker run \
   --name tracee --rm -it \
   --pid=host --cgroupns=host --privileged \
   -v /etc/os-release:/etc/os-release-host:ro \
+  -v /boot/config-$(uname -r):/boot/config-$(uname -r):ro \
   -e LIBBPFGO_OSRELEASE_FILE=/etc/os-release-host \
-  aquasec/tracee:latest
+  aquasec/tracee:$(uname -m)
 ```
 
-To learn how to install Tracee in a production environment, [check out the Kubernetes guide](./getting-started/kubernetes-quickstart).
-
+To learn how to install Tracee in a production environment, [check out the Kubernetes guide](https://aquasecurity.github.io/tracee/latest/getting-started/kubernetes-quickstart).
 
 ## Pipeline protection with Tracee
 

@@ -25,6 +25,13 @@
         __type(value, _value_type);                                                                \
     } _name SEC(".maps");
 
+#define BPF_MAP_NO_KEY(_name, _type, _value_type, _max_entries)                                    \
+    struct {                                                                                       \
+        __uint(type, _type);                                                                       \
+        __uint(max_entries, _max_entries);                                                         \
+        __type(value, _value_type);                                                                \
+    } _name SEC(".maps");
+
 #define BPF_HASH(_name, _key_type, _value_type, _max_entries)                                      \
     BPF_MAP(_name, BPF_MAP_TYPE_HASH, _key_type, _value_type, _max_entries)
 
@@ -42,6 +49,14 @@
 
 #define BPF_PERF_OUTPUT(_name, _max_entries)                                                       \
     BPF_MAP(_name, BPF_MAP_TYPE_PERF_EVENT_ARRAY, int, __u32, _max_entries)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0) || defined(CORE)
+    #define BPF_QUEUE(_name, _value_type, _max_entries)                                            \
+        BPF_MAP_NO_KEY(_name, BPF_MAP_TYPE_QUEUE, _value_type, _max_entries)
+
+    #define BPF_STACK(_name, _value_type, _max_entries)                                            \
+        BPF_MAP_NO_KEY(_name, BPF_MAP_TYPE_STACK, _value_type, _max_entries)
+#endif
 
 // stack traces: the value is 1 big byte array of the stack addresses
 typedef __u64 stack_trace_t[MAX_STACK_DEPTH];
@@ -69,6 +84,11 @@ enum tail_call_id_e
     TAIL_SCHED_PROCESS_EXEC_EVENT_SUBMIT,
     TAIL_VFS_READ,
     TAIL_VFS_READV,
+    TAIL_EXEC_BINPRM1,
+    TAIL_EXEC_BINPRM2,
+    TAIL_HIDDEN_KERNEL_MODULE_PROC,
+    TAIL_HIDDEN_KERNEL_MODULE_KSET,
+    TAIL_HIDDEN_KERNEL_MODULE_MOD_TREE,
     MAX_TAIL_CALL
 };
 
@@ -85,10 +105,8 @@ BPF_HASH(uts_ns_filter, string_filter_t, eq_t, 256);               // filter eve
 BPF_HASH(comm_filter, string_filter_t, eq_t, 256);                 // filter events by command name
 BPF_HASH(cgroup_id_filter, u32, eq_t, 256);                        // filter events by cgroup id
 BPF_HASH(binary_filter, binary_t, eq_t, 256);                      // filter events by binary path and mount namespace
-BPF_HASH(events_map, u32, u64, MAX_EVENT_ID);                      // map to persist event configuration data (currently submit scopes)
-BPF_HASH(bin_args_map, u64, bin_args_t, 256);                      // persist args for send_bin funtion
+BPF_HASH(events_map, u32, event_config_t, MAX_EVENT_ID);           // map to persist event configuration data
 BPF_HASH(sys_32_to_64_map, u32, u32, 1024);                        // map 32bit to 64bit syscalls
-BPF_HASH(params_types_map, u32, u64, 1024);                        // encoded parameters types for event
 BPF_HASH(process_tree_map, u32, eq_t, 10240);                      // filter events by the ancestry of the traced process
 BPF_LRU_HASH(proc_info_map, u32, proc_info_t, 10240);              // holds data for every process
 BPF_LRU_HASH(task_info_map, u32, task_info_t, 10240);              // holds data for every task
@@ -109,8 +127,9 @@ BPF_PROG_ARRAY(sys_exit_init_tail, MAX_EVENT_ID);                  // store prog
 BPF_STACK_TRACE(stack_addresses, MAX_STACK_ADDRESSES);             // store stack traces
 BPF_HASH(module_init_map, u32, kmod_data_t, 256);                  // holds module information between
 BPF_LRU_HASH(fd_arg_path_map, fd_arg_task_t, fd_arg_path_t, 1024); // store fds paths by task
-BPF_LRU_HASH(bpf_attach_map, u32, bpf_attach_t, 1024);             // holds bpf prog info
-BPF_LRU_HASH(bpf_attach_tmp_map, u32, bpf_attach_t, 1024);         // temporarily hold bpf_attach_t
+BPF_LRU_HASH(bpf_attach_map, u32, bpf_used_helpers_t, 1024);       // holds bpf prog info
+BPF_LRU_HASH(bpf_attach_tmp_map, u32, bpf_used_helpers_t, 1024);   // temporarily hold bpf_used_helpers_t
+BPF_LRU_HASH(bpf_prog_load_map, u32, void *, 1024);                // store bpf prog aux pointer between bpf_check and security_bpf_prog
 BPF_PERCPU_ARRAY(event_data_map, event_data_t, 1);                 // persist event related data
 BPF_HASH(logs_count, bpf_log_t, bpf_log_count_t, 4096);            // logs count
 BPF_PERCPU_ARRAY(scratch_map, scratch_t, 1);                       // scratch space to avoid allocating stuff on the stack

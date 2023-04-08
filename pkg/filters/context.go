@@ -3,8 +3,8 @@ package filters
 import (
 	"strings"
 
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events"
-	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/trace"
 )
 
@@ -94,6 +94,7 @@ func (filter *ContextFilter) Parse(filterName string, operatorAndValues string) 
 			podNameFilter:        NewStringFilter(),
 			podNSFilter:          NewStringFilter(),
 			podUIDFilter:         NewStringFilter(),
+			podSandboxFilter:     NewBoolFilter(),
 			syscallFilter:        NewStringFilter(),
 		}
 		filter.filters[id] = eventFilter
@@ -101,7 +102,7 @@ func (filter *ContextFilter) Parse(filterName string, operatorAndValues string) 
 
 	err := eventFilter.Parse(eventField, operatorAndValues)
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 
 	filter.Enable()
@@ -109,29 +110,31 @@ func (filter *ContextFilter) Parse(filterName string, operatorAndValues string) 
 }
 
 type eventCtxFilter struct {
-	enabled              bool
-	timestampFilter      *IntFilter[int64]
-	processorIDFilter    *IntFilter[int64]
-	pidFilter            *IntFilter[int64]
-	tidFilter            *IntFilter[int64]
-	ppidFilter           *IntFilter[int64]
-	hostPidFilter        *IntFilter[int64]
-	hostTidFilter        *IntFilter[int64]
-	hostPpidFilter       *IntFilter[int64]
-	uidFilter            *IntFilter[int64]
-	mntNSFilter          *IntFilter[int64]
-	pidNSFilter          *IntFilter[int64]
-	processNameFilter    *StringFilter
-	hostNameFilter       *StringFilter
-	cgroupIDFilter       *UIntFilter[uint64]
-	containerFilter      *BoolFilter
-	containerIDFilter    *StringFilter
-	containerImageFilter *StringFilter
-	containerNameFilter  *StringFilter
-	podNameFilter        *StringFilter
-	podNSFilter          *StringFilter
-	podUIDFilter         *StringFilter
-	syscallFilter        *StringFilter
+	enabled                    bool
+	timestampFilter            *IntFilter[int64]
+	processorIDFilter          *IntFilter[int64]
+	pidFilter                  *IntFilter[int64]
+	tidFilter                  *IntFilter[int64]
+	ppidFilter                 *IntFilter[int64]
+	hostPidFilter              *IntFilter[int64]
+	hostTidFilter              *IntFilter[int64]
+	hostPpidFilter             *IntFilter[int64]
+	uidFilter                  *IntFilter[int64]
+	mntNSFilter                *IntFilter[int64]
+	pidNSFilter                *IntFilter[int64]
+	processNameFilter          *StringFilter
+	hostNameFilter             *StringFilter
+	cgroupIDFilter             *UIntFilter[uint64]
+	containerFilter            *BoolFilter
+	containerIDFilter          *StringFilter
+	containerImageFilter       *StringFilter
+	containerImageDigestFilter *StringFilter
+	containerNameFilter        *StringFilter
+	podNameFilter              *StringFilter
+	podNSFilter                *StringFilter
+	podUIDFilter               *StringFilter
+	podSandboxFilter           *BoolFilter
+	syscallFilter              *StringFilter
 }
 
 func (f *eventCtxFilter) Enable() {
@@ -150,13 +153,13 @@ func (filter *eventCtxFilter) Filter(evt trace.Event) bool {
 	// TODO: optimize the order of filter calls
 	// if we order this by most to least likely filter to be set
 	// we can short circuit this logic.
-	return filter.containerFilter.Filter(evt.ContainerID != "") &&
+	return filter.containerFilter.Filter(evt.Container.ID != "") &&
 		filter.processNameFilter.Filter(evt.ProcessName) &&
 		filter.timestampFilter.Filter(int64(evt.Timestamp)) &&
 		filter.cgroupIDFilter.Filter(uint64(evt.CgroupID)) &&
-		filter.containerIDFilter.Filter(evt.ContainerID) &&
-		filter.containerImageFilter.Filter(evt.ContainerImage) &&
-		filter.containerNameFilter.Filter(evt.ContainerName) &&
+		filter.containerIDFilter.Filter(evt.Container.ID) &&
+		filter.containerImageFilter.Filter(evt.Container.ImageName) &&
+		filter.containerNameFilter.Filter(evt.Container.Name) &&
 		filter.hostNameFilter.Filter(evt.HostName) &&
 		filter.hostPidFilter.Filter(int64(evt.HostProcessID)) &&
 		filter.hostPpidFilter.Filter(int64(evt.HostParentProcessID)) &&
@@ -167,9 +170,9 @@ func (filter *eventCtxFilter) Filter(evt trace.Event) bool {
 		filter.ppidFilter.Filter(int64(evt.ParentProcessID)) &&
 		filter.pidNSFilter.Filter(int64(evt.PIDNS)) &&
 		filter.processorIDFilter.Filter(int64(evt.ProcessorID)) &&
-		filter.podNameFilter.Filter(evt.ContainerImage) &&
-		filter.podNSFilter.Filter(evt.PodNamespace) &&
-		filter.podUIDFilter.Filter(evt.PodUID) &&
+		filter.podNameFilter.Filter(evt.Kubernetes.PodName) &&
+		filter.podNSFilter.Filter(evt.Kubernetes.PodNamespace) &&
+		filter.podUIDFilter.Filter(evt.Kubernetes.PodUID) &&
 		filter.tidFilter.Filter(int64(evt.ThreadID)) &&
 		filter.uidFilter.Filter(int64(evt.UserID))
 }
@@ -226,15 +229,22 @@ func (f *eventCtxFilter) Parse(field string, operatorAndValues string) error {
 		filter := f.containerFilter
 		filter.Enable()
 		return filter.add(true, Equal)
+	// TODO: change this and below container filters to the format
+	// eventname.context.container.id and so on...
 	case "containerId":
 		filter := f.containerIDFilter
 		return f.addContainer(filter, operatorAndValues)
 	case "containerImage":
 		filter := f.containerImageFilter
 		return f.addContainer(filter, operatorAndValues)
+	case "containerImageDigest":
+		filter := f.containerImageDigestFilter
+		return f.addContainer(filter, operatorAndValues)
 	case "containerName":
 		filter := f.containerNameFilter
 		return f.addContainer(filter, operatorAndValues)
+	// TODO: change this and below pod filters to the format
+	// eventname.context.kubernetes.podName and so on...
 	case "podName":
 		filter := f.podNameFilter
 		return f.addContainer(filter, operatorAndValues)
@@ -243,6 +253,9 @@ func (f *eventCtxFilter) Parse(field string, operatorAndValues string) error {
 		return f.addContainer(filter, operatorAndValues)
 	case "podUid":
 		filter := f.podUIDFilter
+		return f.addContainer(filter, operatorAndValues)
+	case "podSandbox":
+		filter := f.podSandboxFilter
 		return f.addContainer(filter, operatorAndValues)
 	case "syscall":
 		filter := f.syscallFilter
@@ -254,9 +267,11 @@ func (f *eventCtxFilter) Parse(field string, operatorAndValues string) error {
 func (f *eventCtxFilter) addContainer(filter Filter, operatorAndValues string) error {
 	err := filter.Parse(operatorAndValues)
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
-	f.containerFilter.add(true, Equal)
+	if err = f.containerFilter.add(true, Equal); err != nil {
+		return errfmt.WrapError(err)
+	}
 	f.containerFilter.Enable()
 	return nil
 }

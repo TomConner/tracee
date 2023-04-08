@@ -1,25 +1,52 @@
----
+#
+# When a PR is opened or updated: Run Tracee Tests
+#
 name: PR
 on:
   workflow_dispatch: {}
   pull_request:
     branches:
       - main
+    paths:
+      - "!docs/**"
+      - "!deploy/**"
+      - "!packaging/**"
+      - "!**.yaml"
+      - "!**.md"
+      - "!**.txt"
+      - "!**.conf"
+      # override previous rules:
+      - "go.mod"
+      - "go.sum"
+      - "**.c"
+      - "**.h"
+      - "**.go"
+      - "**.sh"
+      - "**/pr.yaml"
+concurrency:
+  group: ${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 env:
-  TESTS: "TRC-102 TRC-103 TRC-104 TRC-105 TRC-107 TRC-1018 TRC-1014 TRC-1016 TRC-1010"
+  # TRC-103 enabled but under analysis
+  # https://github.com/aquasecurity/tracee/issues/2820
+  TESTS: "TRC-102 TRC-103 TRC-104 TRC-105 TRC-107 TRC-1010 TRC-1014 TRC-1016 TRC-1018 TRC-1022"
+  # ARM64 tests are disabled due to missing arm64 binaries in tracee-tester
+  # https://github.com/aquasecurity/tracee/issues/2821
+  # TRC-1022 disabled in ARM64_TESTS since it doesn't work on Focal 4.19 and 5.4.
+  ARM64_TESTS: "TRC-102 TRC-103 TRC-104 TRC-105 TRC-107 TRC-1010 TRC-1014 TRC-1016 TRC-1018"
+  RHEL_ARM64_TESTS: "TRC-102 TRC-103 TRC-104 TRC-105 TRC-107 TRC-1010 TRC-1014 TRC-1016 TRC-1018 TRC-1022"
   NETTESTS: "IPv4 IPv6 TCP UDP ICMP ICMPv6 DNS HTTP"
-  INSTTESTS: "VFS_WRITE FILE_MODIFICATION"
-
+  INSTTESTS: "VFS_WRITE FILE_MODIFICATION SECURITY_INODE_RENAME"
 jobs:
   #
-  # CODE VERIFICATION
+  # CODE VERIFICATION (github runner)
   #
   verify-analyze-code:
     name: Verify and Analyze Code
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
       - name: Install Dependencies
@@ -42,8 +69,11 @@ jobs:
       - name: Check with StaticCheck
         run: |
           make check-staticcheck
+      - name: Check with errcheck
+        run: |
+          make check-err
   #
-  # SIGNATURES CODE VERIFICATION
+  # SIGNATURES CODE VERIFICATION (github runner)
   #
   verify-signatures:
     name: Verify Signatures
@@ -52,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
       - name: Install Dependencies
@@ -64,16 +94,47 @@ jobs:
         run: |
           make test-signatures
   #
-  # CODE TESTS
+  # TOOLS BUILD VERIFICATION (github runner)
   #
-  unit-integration-tests:
-    name: Unit and Integration Tests
+  verify-tools:
+    name: Verify Other Tools
     needs:
       - verify-analyze-code
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install Dependencies
+        uses: ./.github/actions/build-dependencies
+      - name: Build Tracee Benchmark Tool
+        run: |
+          make clean
+          make tracee-bench
+      - name: Build Tracee GPT Docs Tool
+        run: |
+          make clean
+          make tracee-gptdocs
+      - name: Build E2E Network Signatures
+        run: |
+          make clean
+          make e2e-net-signatures
+      - name: Build E2E Instrumentation Signatures
+        run: |
+          make clean
+          make e2e-instrumentation-signatures
+  #
+  # CODE TESTS (github runner)
+  #
+  unit-tests:
+    name: Unit Tests
+    needs:
+      - verify-analyze-code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
         with:
           submodules: true
       - name: Install Dependencies
@@ -81,9 +142,25 @@ jobs:
       - name: Run Unit Tests
         run: |
           make test-unit
+  #
+  # INTEGRATION TESTS
+  #
+  integration-tests:
+    name: Integration Tests
+    needs:
+      - verify-analyze-code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install Dependencies
+        uses: ./.github/actions/build-dependencies
       - name: Run Integration Tests
         run: |
           sudo env "PATH=$PATH" make test-integration
+  #
   #----
   # JENKINS RUNNERS
   #
@@ -101,12 +178,14 @@ jobs:
   #
   #----
   #
-  # FOCALv5.4
+  # ALMA v4.18
   #
-  focal54-core:
-    name: Focal 5.4 CORE
+  alma418-core:
+    name: RHEL8 4.18 X64 CORE
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -114,13 +193,430 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-0215ef3ceac330d0a_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0256d27c94fd8654b_${{ github.event.number }}-${{ github.run_id }}_x64c",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  alma418:
+    name: RHEL8 4.18 X64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0256d27c94fd8654b_${{ github.event.number }}-${{ github.run_id }}_x64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/kerneltest.sh
+      - name: "NONCORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
+      - name: "NONCORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  # ARM64
+  alma418-arm64-core:
+    name: RHEL8 4.18 ARM64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-06bf1de0491bed185_${{ github.event.number }}-${{ github.run_id }}_arm64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.RHEL_ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  alma418-arm64:
+    name: RHEL8 4.18 ARM64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-06bf1de0491bed185_${{ github.event.number }}-${{ github.run_id }}_arm64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.RHEL_ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "NONCORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
+      - name: "NONCORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  #
+  # AMZN2 5.10 (jammy userland with AMZN2 kernel)
+  #
+  amzn2510-core:
+    name: AMZN2 5.10 X64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0d099424e2075f1a4_${{ github.event.number }}-${{ github.run_id }}_x64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  amzn2510:
+    name: AMZN2 5.10 X64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0d099424e2075f1a4_${{ github.event.number }}-${{ github.run_id }}_x64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/kerneltest.sh
+      - name: "NONCORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
+      - name: "NONCORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  # ARM64
+  amzn2510-arm64-core:
+    name: AMZN2 5.10 ARM64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-00c130a5b3b61db15_${{ github.event.number }}-${{ github.run_id }}_arm64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.RHEL_ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  amzn2510-arm64:
+    name: AMZN2 5.10 ARM64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-00c130a5b3b61db15_${{ github.event.number }}-${{ github.run_id }}_arm64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.RHEL_ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "NONCORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
+      - name: "NONCORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  #
+  # GKE 5.4 (jammy userland with GKE kernel)
+  #
+  gke54-core:
+    name: GKE 5.4 X64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0ba301555616a1dbd_${{ github.event.number }}-${{ github.run_id }}_x64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  #
+  # GKE 5.10 (jammy userland with GKE kernel)
+  #
+  gke510-core:
+    name: GKE 5.10 X64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-060404a5b1dc571e6_${{ github.event.number }}-${{ github.run_id }}_x64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  #
+  # GKE 5.15 (jammy userland with GKE kernel)
+  #
+  gke515-core:
+    name: GKE 5.15 X64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0d96f848dbe84ee3e_${{ github.event.number }}-${{ github.run_id }}_x64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  # ARM64
+  gke515-arm64-core:
+    name: GKE 5.15 ARM64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0ffd52e93f1a0370b_${{ github.event.number }}-${{ github.run_id }}_arm64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.RHEL_ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  #
+  # FOCAL v5.4
+  #
+  focal54-core:
+    name: Focal 5.4 X64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0215ef3ceac330d0a_${{ github.event.number }}-${{ github.run_id }}_x64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # CORE
       - name: "CORE: Kernel"
         run: |
@@ -132,9 +628,11 @@ jobs:
         run: |
           DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
   focal54:
-    name: Focal 5.4
+    name: Focal 5.4 X64
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -142,13 +640,16 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-0601bde02a6437b33_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0215ef3ceac330d0a_${{ github.event.number }}-${{ github.run_id }}_x64",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # NONCORE
       - name: "NONCORE: Kernel"
         run: |
@@ -159,13 +660,13 @@ jobs:
       - name: "NONCORE: Instrumentation"
         run: |
           DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
-  #
-  # FOCAL v5.13
-  #
-  focal513-core:
-    name: Focal 5.13 CORE
+  # ARM64
+  focal54-arm64-core:
+    name: Focal 5.4 ARM64 CORE
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -173,13 +674,85 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-0f23165db12015479_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0964f99b81de934a3_${{ github.event.number }}-${{ github.run_id }}_arm64c",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  focal54-arm64:
+    name: Focal 5.4 ARM64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0964f99b81de934a3_${{ github.event.number }}-${{ github.run_id }}_arm64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "NONCORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
+      - name: "NONCORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  #
+  # FOCAL v5.13
+  #
+  focal513-core:
+    name: Focal 5.13 X64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0f23165db12015479_${{ github.event.number }}-${{ github.run_id }}_x64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # CORE
       - name: "CORE: Kernel"
         run: |
@@ -191,9 +764,11 @@ jobs:
         run: |
           DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
   focal513:
-    name: Focal 5.13
+    name: Focal 5.13 X64
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -201,13 +776,16 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-078f5ea2295f177e3_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0f23165db12015479_${{ github.event.number }}-${{ github.run_id }}_x64",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # NONCORE
       - name: "NONCORE: Kernel"
         run: |
@@ -218,13 +796,13 @@ jobs:
       - name: "NONCORE: Instrumentation"
         run: |
           DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
-  #
-  # JAMMY v5.15
-  #
-  jammy515-core:
-    name: Jammy 5.15 CORE
+  # ARM64
+  focal513-arm64-core:
+    name: Focal 5.13 ARM64 CORE
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -232,13 +810,85 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-0238444dc8524d8c7_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0f12d300b01df6d27_${{ github.event.number }}-${{ github.run_id }}_arm64c",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  focal513-arm64:
+    name: Focal 5.13 ARM64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0f12d300b01df6d27_${{ github.event.number }}-${{ github.run_id }}_arm64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "NONCORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
+      - name: "NONCORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  #
+  # JAMMY v5.15
+  #
+  jammy515-core:
+    name: Jammy 5.15 X64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0238444dc8524d8c7_${{ github.event.number }}-${{ github.run_id }}_x64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # CORE
       - name: "CORE: Kernel"
         run: |
@@ -250,9 +900,11 @@ jobs:
         run: |
           DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
   jammy515:
-    name: Jammy 5.15
+    name: Jammy 5.15 X64
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -260,13 +912,16 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-067bae9e96c5e6d16_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0238444dc8524d8c7_${{ github.event.number }}-${{ github.run_id }}_x64",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # NONCORE
       - name: "NONCORE: Kernel"
         run: |
@@ -277,13 +932,13 @@ jobs:
       - name: "NONCORE: Instrumentation"
         run: |
           DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
-  #
-  # JAMMY v5.19
-  #
-  jammy519-core:
-    name: Jammy 5.19 CORE
+  # ARM64
+  jammy515-arm64-core:
+    name: Jammy 5.15 ARM64 CORE
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -291,13 +946,85 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-0f14a28ff0b2d6279_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0870bd48b77710358_${{ github.event.number }}-${{ github.run_id }}_arm64c",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  jammy515-arm64:
+    name: Jammy 5.15 ARM64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0870bd48b77710358_${{ github.event.number }}-${{ github.run_id }}_arm64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "NONCORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
+      - name: "NONCORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  #
+  # JAMMY v5.19
+  #
+  jammy519-core:
+    name: Jammy 5.19 X64 CORE
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0f14a28ff0b2d6279_${{ github.event.number }}-${{ github.run_id }}_x64c",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # CORE
       - name: "CORE: Kernel"
         run: |
@@ -309,9 +1036,11 @@ jobs:
         run: |
           DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
   jammy519:
-    name: Jammy 5.19
+    name: Jammy 5.19 X64
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -319,13 +1048,16 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-034f8f73bfac81c60_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0f14a28ff0b2d6279_${{ github.event.number }}-${{ github.run_id }}_x64",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # NONCORE
       - name: "NONCORE: Kernel"
         run: |
@@ -336,13 +1068,13 @@ jobs:
       - name: "NONCORE: Instrumentation"
         run: |
           DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
-  #
-  # FOCAL v4.19 (non CO-RE only)
-  #
-  focal419:
-    name: Focal 4.19
+  # ARM64
+  jammy519-arm64-core:
+    name: Jammy 5.19 ARM64 CORE
     needs:
-      - unit-integration-tests
+      - unit-tests
+      - verify-signatures
+      - verify-tools
     env:
       HOME: "/tmp/root"
       GOPATH: "/tmp/go"
@@ -350,13 +1082,85 @@ jobs:
       GOROOT: "/usr/local/go"
     runs-on:
       [
-        "github-self-hosted_ami-0bab76ae5b7322b45_${{ github.event.number }}-${{ github.run_id }}",
+        "github-self-hosted_ami-0d40904002284d8de_${{ github.event.number }}-${{ github.run_id }}_arm64c",
       ]
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "CORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
+      - name: "CORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
+  jammy519-arm64:
+    name: Jammy 5.19 ARM64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0d40904002284d8de_${{ github.event.number }}-${{ github.run_id }}_arm64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=0 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "NONCORE: Network"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
+      - name: "NONCORE: Instrumentation"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  #
+  # FOCAL v4.19 (non CO-RE only)
+  #
+  focal419:
+    name: Focal 4.19 X64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-06c844d8e084a6328_${{ github.event.number }}-${{ github.run_id }}_x64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
         # CORE
       - name: "CORE: Kernel"
         run: |
@@ -377,44 +1181,47 @@ jobs:
       - name: "NONCORE: Instrumentation"
         run: |
           echo UNSUPPORTED
-
-  # TODO: having internal server errors from Jenkins (might need AMI change)S
-  #
-  # stream8:
-  #   name: Stream8 4.19
-  #   needs:
-  #     - unit-integration-tests
-  #   env:
-  #     HOME: "/tmp/root"
-  #     GOPATH: "/tmp/go"
-  #     GOCACHE: "/tmp/go-cache"
-  #     GOROOT: "/usr/local/go"
-  #   runs-on:
-  #     [
-  #       "github-self-hosted_ami-00ec9bfceee11187e_${{ github.event.number }}-${{ github.run_id }}",
-  #     ]
-  #   steps:
-  #     - name: "Checkout"
-  #       uses: actions/checkout@v2
-  #       with:
-  #         submodules: true
-  #       # CORE
-  #     - name: "CORE: Kernel"
-  #       run: |
-  #         DONTSLEEP=1 ISNONCORE=0 ./tests/kerneltest.sh
-  #     - name: "CORE: Network"
-  #       run: |
-  #         DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-net-test.sh
-  #     - name: "CORE: Instrumentation"
-  #       run: |
-  #         DONTSLEEP=1 ISNONCORE=0 ./tests/e2e-instrumentation-test.sh
-  #       # NONCORE
-  #     - name: "NONCORE: Kernel"
-  #       run: |
-  #         DONTSLEEP=1 ISNONCORE=1 ./tests/kerneltest.sh
-  #     - name: "NONCORE: Network"
-  #       run: |
-  #         DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-net-test.sh
-  #     - name: "NONCORE: Instrumentation"
-  #       run: |
-  #         DONTSLEEP=1 ISNONCORE=1 ./tests/e2e-instrumentation-test.sh
+  # ARM64
+  focal419-arm64:
+    name: Focal 4.19 ARM64
+    needs:
+      - unit-tests
+      - verify-signatures
+      - verify-tools
+    env:
+      HOME: "/tmp/root"
+      GOPATH: "/tmp/go"
+      GOCACHE: "/tmp/go-cache"
+      GOROOT: "/usr/local/go"
+    runs-on:
+      [
+        "github-self-hosted_ami-0956bf30569c0bce9_${{ github.event.number }}-${{ github.run_id }}_x64",
+      ]
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+        # CORE
+      - name: "CORE: Kernel"
+        run: |
+          echo UNSUPPORTED
+      - name: "CORE: Network"
+        run: |
+          echo UNSUPPORTED
+      - name: "CORE: Instrumentation"
+        run: |
+          echo UNSUPPORTED
+        # NONCORE
+      - name: "NONCORE: Kernel"
+        run: |
+          DONTSLEEP=1 ISNONCORE=1 TESTS="${{ env.ARM64_TESTS }}" ./tests/kerneltest.sh
+      - name: "NONCORE Network"
+        run: |
+          echo UNSUPPORTED
+      - name: "NONCORE: Instrumentation"
+        run: |
+          echo UNSUPPORTED

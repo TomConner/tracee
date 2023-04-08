@@ -1,5 +1,5 @@
 #
-# Responsible for creating tracee snapshots for testing and releasing
+# Creates tracee snapshots for testing and releasing.
 #
 
 .PHONY: all
@@ -27,6 +27,7 @@ CMD_RM ?= rm
 CMD_TOUCH ?= touch
 CMD_MKDIR ?= mkdir
 CMD_COSIGN ?= cosign
+CMD_MV ?= mv
 
 .ONESHELL:
 .check_%:
@@ -42,6 +43,24 @@ CMD_COSIGN ?= cosign
 #
 # environment
 #
+
+UNAME_M := $(shell uname -m)
+UNAME_R := $(shell uname -r)
+
+ifeq ($(UNAME_M),x86_64)
+	ARCH = x86_64
+	ALTARCH = amd64
+endif
+
+ifeq ($(UNAME_M),aarch64)
+	ARCH = aarch64
+	ALTARCH = arm64
+endif
+
+ifeq ($(ALTARCH),)
+	@echo "can't find architecture"
+	exit 1
+endif
 
 .PHONY: env
 env:
@@ -65,37 +84,30 @@ env:
 .PHONY: help
 help:
 	@echo ""
-	@echo "Create tracee snapshots for testing and releasing"
+	@echo "CREATES TRACEE SNAPSHOTS FOR TESTING AND RELEASING"
 	@echo ""
-	@echo "To generate a release snapshot:"
+	@echo "To GENERATE a release SNAPSHOT (versioned by latest git SHA):"
 	@echo ""
-	@echo "    $$ make -f builder/Makefile.release SNAPSHOT=1"
+	@echo "  $$ SNAPSHOT=1 make -f builder/Makefile.release"
 	@echo ""
-	@echo "    - Compiles tracee-ebpf, tracee-rules and rules"
-	@echo "    - Creates an archive of build artifacts along with license"
-	@echo "    - Takes a checksum of the archive"
+	@echo "  > Compiles tracee-ebpf, tracee-rules and rules"
+	@echo "  > Creates an archive of build artifacts along with license"
+	@echo "  > Takes a checksum of the archive"
 	@echo ""
-	@echo "    - Container images are:"
-	@echo "        - aquasec/tracee:latest (embedded eBPF CO-RE obj with BTFHUB support)"
-	@echo "        - aquasec/tracee:full   (compiles non CO-RE eBPF object on startup)"
+	@echo "Container images are:"
 	@echo ""
-	@echo "    Example:"
+	@echo "  - aquasec/tracee:latest (embedded eBPF CO-RE obj with BTFHUB support)"
+	@echo "  - aquasec/tracee:full   (compiles non CO-RE eBPF object on startup if needed)"
 	@echo ""
-	@echo "        To create build artifacts versioned by latest git SHA:"
+	@echo "To PUBLISH a release:"
 	@echo ""
-	@echo "        $$ SNAPSHOT=1 make -f builder/Makefile.release"
+	@echo "  $$ PUSH_DOCKER_REPO=aquasec/tracee make -f builder/Makefile.release"
 	@echo ""
-	@echo "To publish a release:"
-	@echo ""
-	@echo "    $$ PUSH_DOCKER_REPO=aquasec/tracee \ "
-	@echo "        make -f builder/Makefile.release"
-	@echo ""
-	@echo "    - Pushes the snapshot release artifacts found by the latest git tag to"
-	@echo "      docker.io/aquasec/tracee"
+	@echo "  > Pushes artifact found by the latest git tag to docker.io/aquasec/tracee"
 	@echo ""
 	@echo "Clean leftovers:"
 	@echo ""
-	@echo "    $$ make -f builder/Makefile.release clean"
+	@echo "  $$ make -f builder/Makefile.release clean"
 	@echo ""
 
 #
@@ -115,12 +127,11 @@ help:
 #
 
 OUTPUT_DIR = ./dist
-RELEASE_NOTES ?= $(OUTPUT_DIR)/release_notes.txt
+RELEASE_NOTES ?= ./release_notes.txt
 
 $(OUTPUT_DIR):
 #
 	$(CMD_MKDIR) -p $@
-	$(CMD_TOUCH) $(RELEASE_NOTES)
 
 #
 # Create a release snapshot
@@ -136,13 +147,15 @@ endif
 
 RELEASE_FILES = LICENSE
 RELEASE_FILES += $(OUTPUT_DIR)/tracee-ebpf
+RELEASE_FILES += $(OUTPUT_DIR)/tracee-ebpf-static
 RELEASE_FILES += $(OUTPUT_DIR)/tracee-rules
 RELEASE_FILES += $(OUTPUT_DIR)/tracee
-RELEASE_FILES += $(OUTPUT_DIR)/rules
-RELEASE_FILES += $(OUTPUT_DIR)/tracee.bpf.core.o
+RELEASE_FILES += $(OUTPUT_DIR)/tracee-static
+RELEASE_FILES += $(OUTPUT_DIR)/signatures
+#RELEASE_FILES += $(OUTPUT_DIR)/tracee.bpf.core.o
 
-OUT_ARCHIVE := $(OUTPUT_DIR)/tracee.$(SNAPSHOT_VERSION).tar.gz
-OUT_CHECKSUMS := $(OUTPUT_DIR)/checksum.$(SNAPSHOT_VERSION).txt
+OUT_ARCHIVE := $(OUTPUT_DIR)/tracee-$(ARCH).$(SNAPSHOT_VERSION).tar.gz
+OUT_CHECKSUMS := $(OUTPUT_DIR)/checksum-$(ARCH).$(SNAPSHOT_VERSION).txt
 
 PUSH_DOCKER_REPO ?= aquasec/tracee
 
@@ -155,50 +168,77 @@ release: \
 	.check_$(CMD_CHECKSUM) \
 	.check_$(CMD_GITHUB)
 #
-	#
-	# build binaries (tracee-ebpf (CO-RE + BTFHUB), tracee-rules, rules)
-	#
+# SNAPSHOT
+#
+# ----
+#
+# prepare builder
+#
+	$(MAKE) -f builder/Makefile.tracee-make ubuntu-make ARG="clean"
 	$(MAKE) -f builder/Makefile.tracee-make ubuntu-prepare
-	BTFHUB=1 STATIC=1 $(MAKE) -f builder/Makefile.tracee-make ubuntu-make ARG="all"
-	#
-	# create the tar ball and checksum files
-	#
-	$(CMD_TAR) -czf $(OUT_ARCHIVE) $(RELEASE_FILES)
-	$(CMD_CHECKSUM) $(OUT_ARCHIVE) > $(OUT_CHECKSUMS)
-	#
-	# build official slim container image (CO-RE + BTFHUB)
-	#
+#
+# build official full container image (CO-RE + non CO-RE on-demand build)
+#
+	$(MAKE) -f builder/Makefile.tracee-make ubuntu-make ARG="clean"
+	BTFHUB=0 $(MAKE) -f builder/Makefile.tracee-container build-tracee-full
+#
+# build official slim container image (CO-RE + BTFHUB).
+#
+	$(MAKE) -f builder/Makefile.tracee-make ubuntu-make ARG="clean"
 	BTFHUB=1 $(MAKE) -f builder/Makefile.tracee-container build-tracee
-	$(CMD_DOCKER) tag tracee:latest $(PUSH_DOCKER_REPO):latest
-	$(CMD_DOCKER) tag tracee:latest $(PUSH_DOCKER_REPO):$(IMAGE_TAG)
-	#
-	# build official full container image (CO-RE + BTFHUB + non CO-RE build)
-	#
-	BTFHUB=1 $(MAKE) -f builder/Makefile.tracee-container build-tracee-full
-	$(CMD_DOCKER) tag tracee:full $(PUSH_DOCKER_REPO):full
-	$(CMD_DOCKER) tag tracee:full $(PUSH_DOCKER_REPO):full-$(IMAGE_TAG)
-ifneq ("$(SNAPSHOT)", "1")
-	#
-	# push container images to docker hub
-	#
-	$(CMD_DOCKER) push $(PUSH_DOCKER_REPO):latest
 
-	COSIGN_EXPERIMENTAL=1 $(CMD_COSIGN) sign $(PUSH_DOCKER_REPO)@$(shell docker inspect --format='{{index .RepoDigests 0}}' $(PUSH_DOCKER_REPO):latest | awk -F'@' '{print $2}')
-	$(CMD_DOCKER) push $(PUSH_DOCKER_REPO):$(IMAGE_TAG)
-	COSIGN_EXPERIMENTAL=1 $(CMD_COSIGN) sign $(PUSH_DOCKER_REPO)@$(shell docker inspect --format='{{index .RepoDigests 0}}' $(PUSH_DOCKER_REPO):full | awk -F'@' '{print $2}')
-	$(CMD_DOCKER) push $(PUSH_DOCKER_REPO):full
-	
-	$(CMD_DOCKER) push $(PUSH_DOCKER_REPO):full-$(IMAGE_TAG)
-	#
-	# create release notes
-	#
-	echo '## Docker images' >> $(RELEASE_NOTES)
-	echo '- `docker pull docker.io/$(PUSH_DOCKER_REPO):$(IMAGE_TAG) (embedded eBPF CO-RE obj with BTFHUB support)`' >> $(RELEASE_NOTES);
-	echo '- `docker pull docker.io/$(PUSH_DOCKER_REPO):full-$(IMAGE_TAG) (compiles non CO-RE eBPF object on startup)`' >> $(RELEASE_NOTES);
-	#
-	# release it!
-	#
+#
+# build binaries (tracee-ebpf, tracee-rules, rules)
+#
+	$(MAKE) -f builder/Makefile.tracee-make ubuntu-make ARG="clean"
+	BTFHUB=0 STATIC=1 $(MAKE) -f builder/Makefile.tracee-make ubuntu-make ARG="tracee-ebpf"
+	BTFHUB=0 STATIC=1 $(MAKE) -f builder/Makefile.tracee-make ubuntu-make ARG="tracee"
+	$(CMD_MV) dist/tracee-ebpf dist/tracee-ebpf-static
+	$(CMD_MV) dist/tracee dist/tracee-static
+	BTFHUB=0 STATIC=0 $(MAKE) -f builder/Makefile.tracee-make ubuntu-make ARG="all"
+#
+# create the tarball and checksum files
+#
+	$(CMD_TAR) -cvzf $(OUT_ARCHIVE) $(RELEASE_FILES)
+	$(CMD_CHECKSUM) $(OUT_ARCHIVE) > $(OUT_CHECKSUMS)
+
+#
+# note: the dev tags will be created by release-snapshot workflow
+#
+# ----
+#
+# RELEASE
+#
+ifneq ("$(SNAPSHOT)", "1")
+#
+# create release notes (x86_64 only, other arches will be added after release)
+#
+ifeq ($(ARCH),x86_64)
+	$(CMD_TOUCH) $(RELEASE_NOTES)
+	echo '## Docker Images (x86_64 only)  ' >> $(RELEASE_NOTES)
+	echo '- `docker pull docker.io/$(PUSH_DOCKER_REPO):$(IMAGE_TAG)`' >> $(RELEASE_NOTES);
+	echo '- `docker pull docker.io/$(PUSH_DOCKER_REPO):$(IMAGE_TAG)-full`' >> $(RELEASE_NOTES);
+	echo '  ' >> $(RELEASE_NOTES);
+	echo '## Docker Images (per architecture)  ' >> $(RELEASE_NOTES)
+	echo '- `docker pull docker.io/$(PUSH_DOCKER_REPO):x86_64-$(IMAGE_TAG)`' >> $(RELEASE_NOTES);
+	echo '- `docker pull docker.io/$(PUSH_DOCKER_REPO):x86_64-$(IMAGE_TAG)-full`' >> $(RELEASE_NOTES);
+	echo '- `docker pull docker.io/$(PUSH_DOCKER_REPO):aarch64-$(IMAGE_TAG)`' >> $(RELEASE_NOTES);
+	echo '- `docker pull docker.io/$(PUSH_DOCKER_REPO):aarch64-$(IMAGE_TAG)-full`' >> $(RELEASE_NOTES);
+	echo '  ' >> $(RELEASE_NOTES);
+	echo '> The regular image is built with an embedded portable CO-RE eBPF object and BTFHub (for kernels not supporting BTF info).' >> $(RELEASE_NOTES);
+	echo '> The full image is built with an embedded portable CO-RE eBPF object and it is capable of building a per kernel non CO-RE eBPF object.' >> $(RELEASE_NOTES);
+endif
+#
+# release it (x86_64 only, other arches will be added after release)
+#
+ifeq ($(ARCH),x86_64)
 	$(CMD_GITHUB) release create $(SNAPSHOT_VERSION) $(OUT_ARCHIVE) $(OUT_CHECKSUMS) --title $(SNAPSHOT_VERSION) --notes-file $(RELEASE_NOTES)
+endif
+# add artifacts to the already created release (by x86_64 arch)
+ifeq ($(ARCH),aarch64)
+	$(CMD_GITHUB) release upload $(SNAPSHOT_VERSION) $(OUT_ARCHIVE) $(OUT_CHECKSUMS)
+endif
+
 endif
 
 .PHONY: clean

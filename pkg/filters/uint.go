@@ -8,10 +8,12 @@ import (
 	"strings"
 	"unsafe"
 
-	bpf "github.com/aquasecurity/libbpfgo"
-	"github.com/aquasecurity/tracee/pkg/logger"
-	"github.com/aquasecurity/tracee/pkg/utils"
 	"golang.org/x/exp/constraints"
+
+	bpf "github.com/aquasecurity/libbpfgo"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
+	"github.com/aquasecurity/tracee/pkg/utils"
 )
 
 const (
@@ -198,7 +200,7 @@ func (filter *UIntFilter[T]) Parse(operatorAndValues string) error {
 		}
 		err = filter.add(valInt, operator)
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
@@ -226,7 +228,7 @@ func NewBPFUInt32Filter(mapName string) *BPFUIntFilter[uint32] {
 	}
 }
 
-func (filter *BPFUIntFilter[T]) UpdateBPF(bpfModule *bpf.Module, filterScopeID uint) error {
+func (filter *BPFUIntFilter[T]) UpdateBPF(bpfModule *bpf.Module, policyID uint) error {
 	if !filter.Enabled() {
 		return nil
 	}
@@ -238,7 +240,7 @@ func (filter *BPFUIntFilter[T]) UpdateBPF(bpfModule *bpf.Module, filterScopeID u
 	// 4. pid_ns_filter     u64, eq_t
 	equalityFilterMap, err := bpfModule.GetMap(filter.mapName)
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 
 	var keyPointer unsafe.Pointer
@@ -253,22 +255,22 @@ func (filter *BPFUIntFilter[T]) UpdateBPF(bpfModule *bpf.Module, filterScopeID u
 			keyPointer = unsafe.Pointer(&notEqualFilter)
 		}
 
-		var equalInScopes, equalitySetInScopes uint64
+		var equalInPolicies, equalitySetInPolicies uint64
 		curVal, err := equalityFilterMap.GetValue(keyPointer)
 		if err == nil {
-			equalInScopes = binary.LittleEndian.Uint64(curVal[0:8])
-			equalitySetInScopes = binary.LittleEndian.Uint64(curVal[8:16])
+			equalInPolicies = binary.LittleEndian.Uint64(curVal[0:8])
+			equalitySetInPolicies = binary.LittleEndian.Uint64(curVal[8:16])
 		}
 
 		// filterNotEqual == 0, so clear n bitmask bit
-		utils.ClearBit(&equalInScopes, filterScopeID)
-		utils.SetBit(&equalitySetInScopes, filterScopeID)
+		utils.ClearBit(&equalInPolicies, policyID)
+		utils.SetBit(&equalitySetInPolicies, policyID)
 
-		binary.LittleEndian.PutUint64(filterVal[0:8], equalInScopes)
-		binary.LittleEndian.PutUint64(filterVal[8:16], equalitySetInScopes)
+		binary.LittleEndian.PutUint64(filterVal[0:8], equalInPolicies)
+		binary.LittleEndian.PutUint64(filterVal[8:16], equalitySetInPolicies)
 		err = equalityFilterMap.Update(unsafe.Pointer(keyPointer), unsafe.Pointer(&filterVal[0]))
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
@@ -281,22 +283,22 @@ func (filter *BPFUIntFilter[T]) UpdateBPF(bpfModule *bpf.Module, filterScopeID u
 			keyPointer = unsafe.Pointer(&equalFilter)
 		}
 
-		var equalInScopes, equalitySetInScopes uint64
+		var equalInPolicies, equalitySetInPolicies uint64
 		curVal, err := equalityFilterMap.GetValue(keyPointer)
 		if err == nil {
-			equalInScopes = binary.LittleEndian.Uint64(curVal[0:8])
-			equalitySetInScopes = binary.LittleEndian.Uint64(curVal[8:16])
+			equalInPolicies = binary.LittleEndian.Uint64(curVal[0:8])
+			equalitySetInPolicies = binary.LittleEndian.Uint64(curVal[8:16])
 		}
 
 		// filterEqual == 1, so set n bitmask bit
-		utils.SetBit(&equalInScopes, filterScopeID)
-		utils.SetBit(&equalitySetInScopes, filterScopeID)
+		utils.SetBit(&equalInPolicies, policyID)
+		utils.SetBit(&equalitySetInPolicies, policyID)
 
-		binary.LittleEndian.PutUint64(filterVal[0:8], equalInScopes)
-		binary.LittleEndian.PutUint64(filterVal[8:16], equalitySetInScopes)
+		binary.LittleEndian.PutUint64(filterVal[0:8], equalInPolicies)
+		binary.LittleEndian.PutUint64(filterVal[8:16], equalitySetInPolicies)
 		err = equalityFilterMap.Update(unsafe.Pointer(keyPointer), unsafe.Pointer(&filterVal[0]))
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 

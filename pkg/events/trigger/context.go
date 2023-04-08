@@ -4,8 +4,8 @@ import (
 	"sync"
 
 	"github.com/aquasecurity/tracee/pkg/counter"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events/parse"
-	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/trace"
 )
 
@@ -34,7 +34,7 @@ func NewContext() *context {
 
 func (store *context) Store(event trace.Event) uint64 {
 	id := uint64(store.counter.Read())
-	store.counter.Increment(1)
+	_ = store.counter.Increment()
 	store.mutex.Lock()
 	store.store[id] = event
 	store.mutex.Unlock()
@@ -57,7 +57,7 @@ func (store *context) Get(id uint64) (trace.Event, bool) {
 func (store *context) Apply(event trace.Event) (trace.Event, error) {
 	contextID, err := parse.ArgVal[uint64](&event, ContextArgName)
 	if err != nil {
-		return trace.Event{}, logger.NewErrorf("error parsing caller_context_id arg: %v", err)
+		return trace.Event{}, errfmt.Errorf("error parsing caller_context_id arg: %v", err)
 	}
 	invoking, ok := store.Get(contextID)
 	if !ok {
@@ -73,10 +73,10 @@ func (store *context) Apply(event trace.Event) (trace.Event, error) {
 	invoking.EventID = event.EventID
 	invoking.ReturnValue = 0
 	invoking.Args = make([]trace.Argument, len(event.Args))
-	invoking.MatchedScopes = event.MatchedScopes
+	invoking.MatchedPolicies = event.MatchedPolicies
 	copied := copy(invoking.Args, event.Args)
 	if copied != len(event.Args) {
-		return trace.Event{}, logger.NewErrorf("failed to apply event's args")
+		return trace.Event{}, errfmt.Errorf("failed to apply event's args")
 	}
 	invoking.ArgsNum = event.ArgsNum
 

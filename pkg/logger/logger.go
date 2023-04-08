@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -49,31 +47,30 @@ var (
 	NewProductionEncoderConfig  = zap.NewProductionEncoderConfig
 )
 
+type LoggerInterface interface {
+	Debugw(msg string, keyAndValues ...interface{})
+	Infow(msg string, keyAndValues ...interface{})
+	Warnw(msg string, keyAndValues ...interface{})
+	Errorw(msg string, keyAndValues ...interface{})
+	Fatalw(msg string, keyAndValues ...interface{})
+	Sync() error
+}
+
 // Logger struct
 type Logger struct {
-	l   *zap.SugaredLogger
-	cfg *LoggerConfig
+	l   LoggerInterface
+	cfg LoggingConfig
 
-	LogCount *LogCounter // updated only on debug level and cfg.Aggregate == true
+	logCount *logCounter // updated only on debug level and cfg.Aggregate == true
 }
 
 // NewLogger function
-func NewLogger(cfg *LoggerConfig) *Logger {
-	if cfg == nil {
-		panic("LoggerConfig cannot be nil")
-	}
-
-	core := zapcore.NewCore(
+func NewLogger(cfg LoggerConfig) LoggerInterface {
+	return zap.New(zapcore.NewCore(
 		cfg.Encoder,
 		zapcore.AddSync(cfg.Writer),
 		zapcore.Level(cfg.Level),
-	)
-
-	return &Logger{
-		l:        zap.New(core).Sugar(),
-		cfg:      cfg,
-		LogCount: newLogCounter(),
-	}
+	)).Sugar()
 }
 
 const (
@@ -81,154 +78,47 @@ const (
 	DefaultFlushInterval = time.Duration(3) * time.Second
 )
 
-type LoggerConfig struct {
-	Writer        io.Writer
-	Level         Level
-	Encoder       Encoder
+// LoggingConfig defines the configuration of the package level logging.
+//
+// Users importing tracee as a library may choose to construct a tracee flavored logger with
+// NewLogger() or supply their own interface.
+//
+// Tracee offers aggregation support on top of any logger implementation complying to it's interface.
+type LoggingConfig struct {
+	Logger        LoggerInterface
 	Aggregate     bool
 	FlushInterval time.Duration
+}
+
+// LoggerConfig defines the configuration parameters for constructing tracee's logger implementation.
+type LoggerConfig struct {
+	Writer  io.Writer
+	Level   Level
+	Encoder Encoder
 }
 
 func defaultEncoder() Encoder {
 	return NewJSONEncoder(NewProductionEncoderConfig())
 }
 
-func NewDefaultLoggerConfig() *LoggerConfig {
-	return &LoggerConfig{
-		Writer:        os.Stderr,
-		Level:         DefaultLevel,
-		Encoder:       defaultEncoder(),
+func NewDefaultLoggerConfig() LoggerConfig {
+	return LoggerConfig{
+		Writer:  os.Stderr,
+		Level:   DefaultLevel,
+		Encoder: defaultEncoder(),
+	}
+}
+
+func NewDefaultLoggingConfig() LoggingConfig {
+	return LoggingConfig{
+		Logger:        NewLogger(NewDefaultLoggerConfig()),
 		Aggregate:     false,
 		FlushInterval: DefaultFlushInterval,
 	}
 }
 
-type LogOrigin struct {
-	File  string
-	Line  int
-	Level Level
-	Msg   string
-}
-
-type LogCounter struct {
-	rwMutex sync.RWMutex
-	data    map[LogOrigin]uint32
-}
-
-func (lc *LogCounter) update(lo LogOrigin) {
-	lc.rwMutex.Lock()
-	defer lc.rwMutex.Unlock()
-	lc.data[lo]++
-}
-
-func (lc *LogCounter) Lookup(key LogOrigin) (count uint32, found bool) {
-	lc.rwMutex.RLock()
-	defer lc.rwMutex.RUnlock()
-	count, found = lc.data[key]
-
-	return
-}
-
-func (lc *LogCounter) dump(flush bool) map[LogOrigin]uint32 {
-	lc.rwMutex.RLock()
-	defer lc.rwMutex.RUnlock()
-	dump := make(map[LogOrigin]uint32, len(lc.data))
-	for k, v := range lc.data {
-		dump[k] = v
-		if flush {
-			delete(lc.data, k)
-		}
-	}
-	return dump
-}
-
-func (lc *LogCounter) Dump() map[LogOrigin]uint32 {
-	return lc.dump(false)
-}
-
-func (lc *LogCounter) Flush() map[LogOrigin]uint32 {
-	return lc.dump(true)
-}
-
-func newLogCounter() *LogCounter {
-	return &LogCounter{
-		rwMutex: sync.RWMutex{},
-		data:    map[LogOrigin]uint32{},
-	}
-}
-
-type callerInfo struct {
-	pkg       string
-	file      string
-	line      int
-	functions []string
-}
-
-// getCallerInfo retuns package, file and line from a function
-// based on the given number of skips (stack frames).
-func getCallerInfo(skip int) *callerInfo {
-	var (
-		pkg       string
-		file      string
-		line      int
-		functions []string
-	)
-
-	// maximum depth of 20
-	pcs := make([]uintptr, 20)
-	n := runtime.Callers(skip+2, pcs)
-	pcs = pcs[:n-1]
-
-	frames := runtime.CallersFrames(pcs)
-	firstCaller := true
-	for {
-		frame, more := frames.Next()
-		if !more {
-			break
-		}
-
-		fn := frame.Function
-		fnStart := strings.LastIndexByte(fn, '/')
-		if fnStart == -1 {
-			fnStart = 0
-		} else {
-			fnStart++
-		}
-
-		fn = fn[fnStart:]
-		pkgEnd := strings.IndexByte(fn, '.')
-		if pkgEnd == -1 {
-			fnStart = 0
-		} else {
-			fnStart = pkgEnd + 1
-		}
-		functions = append(functions, fn[fnStart:])
-
-		if firstCaller {
-			line = frame.Line
-			file = frame.File
-			// set file as relative path
-			pat := "tracee/"
-			traceeIndex := strings.Index(file, pat)
-			if traceeIndex != -1 {
-				file = file[traceeIndex+len(pat):]
-			}
-			pkg = fn[:pkgEnd]
-
-			firstCaller = false
-		}
-	}
-
-	return &callerInfo{
-		pkg:       pkg,
-		file:      file,
-		line:      line,
-		functions: functions,
-	}
-}
-
 func (l *Logger) updateCounter(file string, line int, lvl Level, msg string) {
-	l.LogCount.update(LogOrigin{
+	l.logCount.update(logOrigin{
 		File:  file,
 		Line:  line,
 		Level: lvl,
@@ -290,9 +180,9 @@ func Log(lvl Level, innerAggregation bool, msg string, keysAndValues ...interfac
 }
 
 func formatCallFlow(funcNames []string) string {
-	fns := make([]string, 0)
-	for _, fName := range funcNames {
-		fns = append(fns, fName+"()")
+	fns := make([]string, len(funcNames))
+	for i, fName := range funcNames {
+		fns[i] = fName + "()"
 	}
 
 	return strings.Join(fns, " < ")
@@ -312,11 +202,11 @@ func debugw(skip int, l *Logger, msg string, keysAndValues ...interface{}) {
 	l.l.Debugw(msg, keysAndValues...)
 }
 
-func Debug(msg string, keysAndValues ...interface{}) {
+func Debugw(msg string, keysAndValues ...interface{}) {
 	debugw(1, pkgLogger, msg, keysAndValues...)
 }
 
-func (l *Logger) Debug(msg string, keysAndValues ...interface{}) {
+func (l *Logger) Debugw(msg string, keysAndValues ...interface{}) {
 	debugw(1, l, msg, keysAndValues...)
 }
 
@@ -329,11 +219,11 @@ func infow(skip int, l *Logger, msg string, keysAndValues ...interface{}) {
 	l.l.Infow(msg, keysAndValues...)
 }
 
-func Info(msg string, keysAndValues ...interface{}) {
+func Infow(msg string, keysAndValues ...interface{}) {
 	infow(1, pkgLogger, msg, keysAndValues...)
 }
 
-func (l *Logger) Info(msg string, keysAndValues ...interface{}) {
+func (l *Logger) Infow(msg string, keysAndValues ...interface{}) {
 	infow(1, l, msg, keysAndValues...)
 }
 
@@ -346,11 +236,11 @@ func warnw(skip int, l *Logger, msg string, keysAndValues ...interface{}) {
 	l.l.Warnw(msg, keysAndValues...)
 }
 
-func Warn(msg string, keysAndValues ...interface{}) {
+func Warnw(msg string, keysAndValues ...interface{}) {
 	warnw(1, pkgLogger, msg, keysAndValues...)
 }
 
-func (l *Logger) Warn(msg string, keysAndValues ...interface{}) {
+func (l *Logger) Warnw(msg string, keysAndValues ...interface{}) {
 	warnw(1, l, msg, keysAndValues...)
 }
 
@@ -363,11 +253,11 @@ func errorw(skip int, l *Logger, msg string, keysAndValues ...interface{}) {
 	l.l.Errorw(msg, keysAndValues...)
 }
 
-func Error(msg string, keysAndValues ...interface{}) {
+func Errorw(msg string, keysAndValues ...interface{}) {
 	errorw(1, pkgLogger, msg, keysAndValues...)
 }
 
-func (l *Logger) Error(msg string, keysAndValues ...interface{}) {
+func (l *Logger) Errorw(msg string, keysAndValues ...interface{}) {
 	errorw(1, l, msg, keysAndValues...)
 }
 
@@ -380,11 +270,11 @@ func fatalw(skip int, l *Logger, msg string, keysAndValues ...interface{}) {
 	l.l.Fatalw(msg, keysAndValues...)
 }
 
-func Fatal(msg string, keysAndValues ...interface{}) {
+func Fatalw(msg string, keysAndValues ...interface{}) {
 	fatalw(1, pkgLogger, msg, keysAndValues...)
 }
 
-func (l *Logger) Fatal(msg string, keysAndValues ...interface{}) {
+func (l *Logger) Fatalw(msg string, keysAndValues ...interface{}) {
 	fatalw(1, l, msg, keysAndValues...)
 }
 
@@ -393,162 +283,44 @@ func (l *Logger) Sync() error {
 	return l.l.Sync()
 }
 
-const (
-	TRACEE_LOGGER_LVL       = "TRACEE_LOGGER_LVL"
-	TRACEE_LOGGER_ENCODER   = "TRACEE_LOGGER_ENCODER"
-	TRACEE_LOGGER_AGGREGATE = "TRACEE_LOGGER_AGGREGATE"
-)
-
-// getLoggerLevelFromEnv returns logger level set through TRACEE_LOGGER_LVL
-// environment variable, updating the flag setFromEnv.
-// If the given level is not correct, this returns the default level.
-func getLoggerLevelFromEnv() (lvl Level) {
-	lvlEnv := os.Getenv(TRACEE_LOGGER_LVL)
-	fromEnv := true
-
-	switch lvlEnv {
-	case "debug":
-		lvl = DebugLevel
-	case "info":
-		lvl = InfoLevel
-	case "warn":
-		lvl = WarnLevel
-	case "error":
-		lvl = ErrorLevel
-	case "dpanic":
-		lvl = DPanicLevel
-	case "panic":
-		lvl = PanicLevel
-	case "fatal":
-		lvl = FatalLevel
-	default:
-		fromEnv = false
-		lvl = DefaultLevel
-	}
-
-	if !setFromEnv {
-		setFromEnv = fromEnv
-	}
-	return
-}
-
-// getLoggerEncoderFromEnv returns logger encoder set through TRACEE_LOGGER_ENCODER
-// environment variable, updating the flag setFromEnv.
-// If the given encoder is not correct, this returns the default encoder.
-func getLoggerEncoderFromEnv(lvl Level) (enc Encoder) {
-	encEnv := os.Getenv(TRACEE_LOGGER_ENCODER)
-	fromEnv := true
-	devEncoderConfig := NewDevelopmentEncoderConfig()
-	prodEncoderConfig := NewProductionEncoderConfig()
-
-	switch encEnv {
-	case "json":
-		if lvl == DebugLevel {
-			enc = NewJSONEncoder(devEncoderConfig)
-		} else {
-			enc = NewJSONEncoder(prodEncoderConfig)
-		}
-	case "console":
-		if lvl == DebugLevel {
-			enc = NewConsoleEncoder(devEncoderConfig)
-		} else {
-			enc = NewConsoleEncoder(prodEncoderConfig)
-		}
-	default:
-		fromEnv = false
-		enc = defaultEncoder()
-	}
-
-	if !setFromEnv {
-		setFromEnv = fromEnv
-	}
-	return
-}
-
-// getLoggerAggregateFromEnv returns logger Aggregate boolean set through TRACEE_LOGGER_AGGREGATE
-// environment variable, updating the flag setFromEnv.
-// If the given value is not correct, this returns false.
-func getLoggerAggregateFromEnv() (aggregate bool) {
-	aggEnv := os.Getenv(TRACEE_LOGGER_AGGREGATE)
-	fromEnv := true
-
-	switch aggEnv {
-	case "true":
-		aggregate = true
-	case "false":
-		aggregate = false
-	default:
-		fromEnv = false
-		aggregate = false
-	}
-
-	if !setFromEnv {
-		setFromEnv = fromEnv
-	}
-	return
-}
-
 var (
 	// Package-level Logger
-	pkgLogger *Logger
-
-	setFromEnv bool
+	pkgLogger *Logger = &Logger{}
 )
 
-func IsSetFromEnv() bool {
-	return setFromEnv
-}
-
-// NOTE: init() functions are executed in the lexical order (package names).
-func init() {
-	// It may have already been initialized from another package
-	if pkgLogger != nil {
-		return
-	}
-
-	lvl := getLoggerLevelFromEnv()
-	enc := getLoggerEncoderFromEnv(lvl)
-	agg := getLoggerAggregateFromEnv()
-
-	pkgLogger = NewLogger(
-		&LoggerConfig{
-			Writer:    os.Stderr,
-			Level:     lvl,
-			Encoder:   enc,
-			Aggregate: agg,
-		},
-	)
-}
-
-// Base returns the package-level base logger
-func Base() *Logger {
+// Current returns the package-level base logger
+func Current() *Logger {
 	return pkgLogger
 }
 
-// SetBase sets package-level base logger
-// It's not thread safe so if required use it always at the beggining
-func SetBase(l *Logger) {
+// SetLogger sets package-level base logger
+// It's not thread safe so if required use it always at the beginning
+func SetLogger(l LoggerInterface) {
 	if l == nil {
 		panic("Logger cannot be nil")
 	}
 
-	pkgLogger = l
+	pkgLogger.l = l
 }
 
 // Init sets the package-level base logger using given config
-// It's not thread safe so if required use it always at the beggining
-func Init(cfg *LoggerConfig) {
-	if cfg == nil {
-		panic("LoggerConfig cannot be nil")
+// It's not thread safe so if required use it always at the beginning
+func Init(cfg LoggingConfig) {
+	// set the config
+	pkgLogger.cfg = cfg
+
+	if cfg.Logger == nil {
+		panic("can't initialize a nil Logger")
 	}
 
-	SetBase(NewLogger(cfg))
+	pkgLogger.l = cfg.Logger
+	pkgLogger.logCount = newLogCounter()
 
 	// Flush aggregated logs every interval
 	if pkgLogger.cfg.Aggregate {
 		go func() {
 			for range time.Tick(pkgLogger.cfg.FlushInterval) {
-				for lo, count := range pkgLogger.LogCount.Flush() {
+				for lo, count := range pkgLogger.logCount.Flush() {
 					Log(lo.Level, false, lo.Msg,
 						"origin", fmt.Sprintf("%s:%d", lo.File, lo.Line),
 						"count", count,
@@ -559,37 +331,7 @@ func Init(cfg *LoggerConfig) {
 	}
 }
 
-// GetLevel returns the logger level
-func GetLevel() Level {
-	return pkgLogger.cfg.Level
-}
-
-// HasDebugLevel returns true if logger has debug level
-func HasDebugLevel() bool {
-	return pkgLogger.cfg.Level == DebugLevel
-}
-
-// ErrorFuncName displays a given error prefixed by the current (caller) fn name
-// and a given string in a given format (just like fmt.Sprintf)
-func NewErrorf(format string, a ...interface{}) error {
-	sentence := fmt.Sprintf(format, a...)
-
-	pc, _, _, _ := runtime.Caller(1)
-	funcName := runtime.FuncForPC(pc).Name()
-	index := strings.LastIndex(funcName, "/") + 1
-
-	return fmt.Errorf("%v: %v", funcName[index:], sentence)
-}
-
-// ErrorFunc displays a given error prefixed by the current (caller) fn name
-func ErrorFunc(e error) error {
-	if e != nil {
-		pc, _, _, _ := runtime.Caller(1)
-		funcName := runtime.FuncForPC(pc).Name()
-		index := strings.LastIndex(funcName, "/") + 1
-
-		return fmt.Errorf("%v: %v", funcName[index:], e)
-	}
-
-	return nil
+// Make sure tests don't crash when logging
+func init() {
+	Init(NewDefaultLoggingConfig())
 }

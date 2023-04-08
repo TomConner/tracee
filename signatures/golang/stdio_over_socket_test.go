@@ -3,11 +3,12 @@ package main
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/aquasecurity/tracee/signatures/signaturestest"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestStdioOverSocket(t *testing.T) {
@@ -66,7 +67,7 @@ func TestStdioOverSocket(t *testing.T) {
 						Version:     "2",
 						Name:        "Process standard input/output over socket detected",
 						EventName:   "stdio_over_socket",
-						Description: "A process has its standard input/output redirected to a socket. This behaviour is the base of a Reverse Shell attack, which is when an interactive shell being invoked from a target machine back to the attacker's machine, giving it interactive control over the target. Adversaries may use a Reverse Shell to retain control over a compromised target while bypassing security measures like network firewalls.",
+						Description: "A process has its standard input/output redirected to a socket. This behavior is the base of a Reverse Shell attack, which is when an interactive shell being invoked from a target machine back to the attacker's machine, giving it interactive control over the target. Adversaries may use a Reverse Shell to retain control over a compromised target while bypassing security measures like network firewalls.",
 						Properties: map[string]interface{}{
 							"Severity":             3,
 							"Category":             "execution",
@@ -129,7 +130,7 @@ func TestStdioOverSocket(t *testing.T) {
 						Version:     "2",
 						Name:        "Process standard input/output over socket detected",
 						EventName:   "stdio_over_socket",
-						Description: "A process has its standard input/output redirected to a socket. This behaviour is the base of a Reverse Shell attack, which is when an interactive shell being invoked from a target machine back to the attacker's machine, giving it interactive control over the target. Adversaries may use a Reverse Shell to retain control over a compromised target while bypassing security measures like network firewalls.",
+						Description: "A process has its standard input/output redirected to a socket. This behavior is the base of a Reverse Shell attack, which is when an interactive shell being invoked from a target machine back to the attacker's machine, giving it interactive control over the target. Adversaries may use a Reverse Shell to retain control over a compromised target while bypassing security measures like network firewalls.",
 						Properties: map[string]interface{}{
 							"Severity":             3,
 							"Category":             "execution",
@@ -240,7 +241,7 @@ func TestStdioOverSocket(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			holder := signaturestest.FindingsHolder{}
 			sig := StdioOverSocket{}
-			sig.Init(holder.OnFinding)
+			sig.Init(detect.SignatureContext{Callback: holder.OnFinding})
 
 			for _, e := range tc.Events {
 				err := sig.OnEvent(e.ToProtocol())

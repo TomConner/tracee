@@ -8,10 +8,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/aquasecurity/tracee/types/detect"
-	"github.com/aquasecurity/tracee/types/protocol"
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/rego"
+
+	"github.com/aquasecurity/tracee/types/detect"
+	"github.com/aquasecurity/tracee/types/protocol"
 )
 
 // RegoSignature is an abstract signature that is implemented in rego
@@ -99,8 +100,8 @@ func NewRegoSignature(target string, partialEval bool, regoCodes ...string) (det
 }
 
 // Init implements the Signature interface by resetting internal state
-func (sig *RegoSignature) Init(cb detect.SignatureHandler) error {
-	sig.cb = cb
+func (sig *RegoSignature) Init(ctx detect.SignatureContext) error {
+	sig.cb = ctx.Callback
 	return nil
 }
 

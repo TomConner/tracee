@@ -3,11 +3,12 @@ package main
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/aquasecurity/tracee/signatures/signaturestest"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestK8sApiConnection(t *testing.T) {
@@ -20,8 +21,8 @@ func TestK8sApiConnection(t *testing.T) {
 			Name: "should trigger detection",
 			Events: []trace.Event{
 				{
-					EventName:   "sched_process_exec",
-					ContainerID: "0907ef86d7be",
+					EventName: "sched_process_exec",
+					Container: trace.Container{ID: "0907ef86d7be"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -38,8 +39,8 @@ func TestK8sApiConnection(t *testing.T) {
 					},
 				},
 				{
-					EventName:   "security_socket_connect",
-					ContainerID: "0907ef86d7be",
+					EventName: "security_socket_connect",
+					Container: trace.Container{ID: "0907ef86d7be"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -60,8 +61,8 @@ func TestK8sApiConnection(t *testing.T) {
 						"ip": "1.1.1.1",
 					},
 					Event: trace.Event{
-						EventName:   "security_socket_connect",
-						ContainerID: "0907ef86d7be",
+						EventName: "security_socket_connect",
+						Container: trace.Container{ID: "0907ef86d7be"},
 						Args: []trace.Argument{
 							{
 								ArgMeta: trace.ArgMeta{
@@ -94,8 +95,8 @@ func TestK8sApiConnection(t *testing.T) {
 			Name: "should not trigger detection",
 			Events: []trace.Event{
 				{
-					EventName:   "sched_process_exec",
-					ContainerID: "0907ef86d7be",
+					EventName: "sched_process_exec",
+					Container: trace.Container{ID: "0907ef86d7be"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -112,8 +113,8 @@ func TestK8sApiConnection(t *testing.T) {
 					},
 				},
 				{
-					EventName:   "security_socket_connect",
-					ContainerID: "0907ef86d7be",
+					EventName: "security_socket_connect",
+					Container: trace.Container{ID: "0907ef86d7be"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -133,7 +134,7 @@ func TestK8sApiConnection(t *testing.T) {
 			holder := signaturestest.FindingsHolder{}
 
 			sig := &K8sApiConnection{}
-			err := sig.Init(holder.OnFinding)
+			err := sig.Init(detect.SignatureContext{Callback: holder.OnFinding})
 			require.NoError(t, err)
 
 			for _, e := range tc.Events {

@@ -13,11 +13,12 @@ import (
 	"text/template"
 	"time"
 
+	forward "github.com/IBM/fluent-forward-go/fluent/client"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/pkg/metrics"
 	"github.com/aquasecurity/tracee/types/trace"
-
-	forward "github.com/IBM/fluent-forward-go/fluent/client"
 )
 
 type EventPrinter interface {
@@ -54,7 +55,7 @@ func New(config Config) (EventPrinter, error) {
 	kind := config.Kind
 
 	if config.OutFile == nil {
-		return res, logger.NewErrorf("out file is not set")
+		return res, errfmt.Errorf("out file is not set")
 	}
 
 	switch {
@@ -117,9 +118,8 @@ func (p tableEventPrinter) Preamble() {
 		switch p.containerMode {
 		case ContainerModeDisabled:
 			fmt.Fprintf(p.out,
-				"%-16s %-17s %-17s %-13s %-12s %-12s %-6s %-16s %-7s %-7s %-7s %-16s %-25s %s",
+				"%-16s %-17s %-13s %-12s %-12s %-6s %-16s %-7s %-7s %-7s %-16s %-25s %s",
 				"TIME",
-				"SCOPES",
 				"UTS_NAME",
 				"CONTAINER_ID",
 				"MNT_NS",
@@ -135,9 +135,8 @@ func (p tableEventPrinter) Preamble() {
 			)
 		case ContainerModeEnabled:
 			fmt.Fprintf(p.out,
-				"%-16s %-17s %-17s %-13s %-12s %-12s %-6s %-16s %-15s %-15s %-15s %-16s %-25s %s",
+				"%-16s %-17s %-13s %-12s %-12s %-6s %-16s %-15s %-15s %-15s %-16s %-25s %s",
 				"TIME",
-				"SCOPES",
 				"UTS_NAME",
 				"CONTAINER_ID",
 				"MNT_NS",
@@ -153,9 +152,8 @@ func (p tableEventPrinter) Preamble() {
 			)
 		case ContainerModeEnriched:
 			fmt.Fprintf(p.out,
-				"%-16s %-17s %-17s %-13s %-16s %-12s %-12s %-6s %-16s %-15s %-15s %-15s %-16s %-25s %s",
+				"%-16s %-17s %-13s %-16s %-12s %-12s %-6s %-16s %-15s %-15s %-15s %-16s %-25s %s",
 				"TIME",
-				"SCOPES",
 				"UTS_NAME",
 				"CONTAINER_ID",
 				"IMAGE",
@@ -224,11 +222,11 @@ func (p tableEventPrinter) Print(event trace.Event) {
 	}
 	timestamp := fmt.Sprintf("%02d:%02d:%02d:%06d", ut.Hour(), ut.Minute(), ut.Second(), ut.Nanosecond()/1000)
 
-	containerId := event.ContainerID
+	containerId := event.Container.ID
 	if len(containerId) > 12 {
 		containerId = containerId[:12]
 	}
-	containerImage := event.ContainerImage
+	containerImage := event.Container.ImageName
 	if len(containerImage) > 16 {
 		containerImage = containerImage[:16]
 	}
@@ -242,9 +240,8 @@ func (p tableEventPrinter) Print(event trace.Event) {
 		switch p.containerMode {
 		case ContainerModeDisabled:
 			fmt.Fprintf(p.out,
-				"%-16s %016x  %-16s %-13s %-12d %-12d %-6d %-16s %-7d %-7d %-7d %-16d %-25s ",
+				"%-16s %-17s %-13s %-12d %-12d %-6d %-16s %-7d %-7d %-7d %-16d %-25s ",
 				timestamp,
-				event.MatchedScopes,
 				event.HostName,
 				containerId,
 				event.MountNS,
@@ -259,9 +256,8 @@ func (p tableEventPrinter) Print(event trace.Event) {
 			)
 		case ContainerModeEnabled:
 			fmt.Fprintf(p.out,
-				"%-16s %016x  %-16s %-13s %-12d %-12d %-6d %-16s %-7d/%-7d %-7d/%-7d %-7d/%-7d %-16d %-25s ",
+				"%-16s %-17s %-13s %-12d %-12d %-6d %-16s %-7d/%-7d %-7d/%-7d %-7d/%-7d %-16d %-25s ",
 				timestamp,
-				event.MatchedScopes,
 				event.HostName,
 				containerId,
 				event.MountNS,
@@ -279,12 +275,11 @@ func (p tableEventPrinter) Print(event trace.Event) {
 			)
 		case ContainerModeEnriched:
 			fmt.Fprintf(p.out,
-				"%-16s %016x  %-16s %-13s %-16s %-12d %-12d %-6d %-16s %-7d/%-7d %-7d/%-7d %-7d/%-7d %-16d %-25s ",
+				"%-16s %-17s %-13s %-16s %-12d %-12d %-6d %-16s %-7d/%-7d %-7d/%-7d %-7d/%-7d %-16d %-25s ",
 				timestamp,
-				event.MatchedScopes,
 				event.HostName,
 				containerId,
-				event.ContainerImage,
+				event.Container.ImageName,
 				event.MountNS,
 				event.PIDNS,
 				event.UserID,
@@ -373,11 +368,11 @@ func (p *templateEventPrinter) Init() error {
 	if tmplPath != "" {
 		tmpl, err := template.ParseFiles(tmplPath)
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 		p.templateObj = &tmpl
 	} else {
-		return logger.NewErrorf("please specify a gotemplate for event-based output")
+		return errfmt.Errorf("please specify a gotemplate for event-based output")
 	}
 	return nil
 }
@@ -388,7 +383,7 @@ func (p templateEventPrinter) Print(event trace.Event) {
 	if p.templateObj != nil {
 		err := (*p.templateObj).Execute(p.out, event)
 		if err != nil {
-			logger.Error("error executing template", "error", err)
+			logger.Errorw("Error executing template", "error", err)
 		}
 	} else {
 		fmt.Fprintf(p.out, "Template Obj is nil")
@@ -411,7 +406,7 @@ func (p jsonEventPrinter) Preamble() {}
 func (p jsonEventPrinter) Print(event trace.Event) {
 	eBytes, err := json.Marshal(event)
 	if err != nil {
-		logger.Error("error marshaling event to json", "error", err)
+		logger.Errorw("Error marshaling event to json", "error", err)
 	}
 	fmt.Fprintln(p.out, string(eBytes))
 }
@@ -477,7 +472,7 @@ func (p *gobEventPrinter) Preamble() {}
 func (p *gobEventPrinter) Print(event trace.Event) {
 	err := p.outEnc.Encode(event)
 	if err != nil {
-		logger.Error("error encoding event to gob", "error", err)
+		logger.Errorw("Error encoding event to gob", "error", err)
 	}
 }
 
@@ -537,21 +532,21 @@ func (p *forwardEventPrinter) Init() error {
 	requireAckString := getParameterValue(parameters, "requireAck", "false")
 	requireAck, err := strconv.ParseBool(requireAckString)
 	if err != nil {
-		return logger.NewErrorf("unable to convert requireAck value %q: %v", requireAckString, err)
+		return errfmt.Errorf("unable to convert requireAck value %q: %v", requireAckString, err)
 	}
 
 	// Timeout conversion from string
 	timeoutValueString := getParameterValue(parameters, "connectionTimeout", "10s")
 	connectionTimeout, err := time.ParseDuration(timeoutValueString)
 	if err != nil {
-		return logger.NewErrorf("unable to convert connectionTimeout value %q: %v", timeoutValueString, err)
+		return errfmt.Errorf("unable to convert connectionTimeout value %q: %v", timeoutValueString, err)
 	}
 
 	// We should have both username and password or neither for basic auth
 	username := p.url.User.Username()
 	password, isPasswordSet := p.url.User.Password()
 	if username != "" && !isPasswordSet {
-		return logger.NewErrorf("missing basic auth configuration for Forward destination")
+		return errfmt.Errorf("missing basic auth configuration for Forward destination")
 	}
 
 	// Ensure we support tcp or udp protocols
@@ -560,12 +555,12 @@ func (p *forwardEventPrinter) Init() error {
 		protocol = p.url.Scheme
 	}
 	if protocol != "tcp" && protocol != "udp" {
-		return logger.NewErrorf("unsupported protocol for Forward destination: %s", protocol)
+		return errfmt.Errorf("unsupported protocol for Forward destination: %s", protocol)
 	}
 
 	// Extract the host (and port)
 	address := p.url.Host
-	logger.Info("attempting to connect to Forward destination", "url", address, "tag", p.tag)
+	logger.Infow("Attempting to connect to Forward destination", "url", address, "tag", p.tag)
 
 	// Create a TCP connection to the forward receiver
 	p.client = forward.New(forward.ConnectionOptions{
@@ -584,7 +579,7 @@ func (p *forwardEventPrinter) Init() error {
 	err = p.client.Connect()
 	if err != nil {
 		// The destination may not be available but may appear later so do not return an error here and just connect later.
-		logger.Error("error connecting to Forward destination", "url", p.url.String(), "error", err)
+		logger.Errorw("Error connecting to Forward destination", "url", p.url.String(), "error", err)
 	}
 	return nil
 }
@@ -593,14 +588,14 @@ func (p *forwardEventPrinter) Preamble() {}
 
 func (p *forwardEventPrinter) Print(event trace.Event) {
 	if p.client == nil {
-		logger.Error("invalid Forward client")
+		logger.Errorw("Invalid Forward client")
 		return
 	}
 
 	// The actual event is marshalled as JSON then sent with the other information (tag, etc.)
 	eBytes, err := json.Marshal(event)
 	if err != nil {
-		logger.Error("error marshaling event to json", "error", err)
+		logger.Errorw("Error marshaling event to json", "error", err)
 	}
 
 	record := map[string]interface{}{
@@ -610,7 +605,7 @@ func (p *forwardEventPrinter) Print(event trace.Event) {
 	err = p.client.SendMessage(p.tag, record)
 	// Assuming all is well we continue but if the connection is dropped or some other error we retry
 	if err != nil {
-		logger.Error("error writing to Forward destination", "destination", p.url.Host, "tag", p.tag, "error", err)
+		logger.Errorw("Error writing to Forward destination", "destination", p.url.Host, "tag", p.tag, "error", err)
 		// Try five times to reconnect and send before giving up
 		// TODO: consider using go-kit for circuit break, retry, etc
 		for attempts := 0; attempts < 5; attempts++ {
@@ -631,8 +626,10 @@ func (p *forwardEventPrinter) Epilogue(stats metrics.Stats) {}
 
 func (p forwardEventPrinter) Close() {
 	if p.client != nil {
-		logger.Info("disconnecting from Forward destination", "url", p.url.Host, "tag", p.tag)
-		p.client.Disconnect()
+		logger.Infow("Disconnecting from Forward destination", "url", p.url.Host, "tag", p.tag)
+		if err := p.client.Disconnect(); err != nil {
+			logger.Errorw("Disconnecting from Forward destination", "error", err)
+		}
 	}
 }
 
@@ -645,7 +642,7 @@ type webhookEventPrinter struct {
 func (ws *webhookEventPrinter) Init() error {
 	u, err := url.Parse(ws.outPath)
 	if err != nil {
-		return logger.NewErrorf("unable to parse URL %q: %v", ws.outPath, err)
+		return errfmt.Errorf("unable to parse URL %q: %v", ws.outPath, err)
 	}
 	ws.url = u
 
@@ -654,7 +651,7 @@ func (ws *webhookEventPrinter) Init() error {
 	timeout := getParameterValue(parameters, "timeout", "10s")
 	t, err := time.ParseDuration(timeout)
 	if err != nil {
-		return logger.NewErrorf("unable to convert timeout value %q: %v", timeout, err)
+		return errfmt.Errorf("unable to convert timeout value %q: %v", timeout, err)
 	}
 	ws.timeout = t
 
@@ -666,7 +663,7 @@ func (ws *webhookEventPrinter) Preamble() {}
 func (ws *webhookEventPrinter) Print(event trace.Event) {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		logger.Error("error marshalling event", "error", err)
+		logger.Errorw("Error marshalling event", "error", err)
 		return
 	}
 
@@ -674,7 +671,7 @@ func (ws *webhookEventPrinter) Print(event trace.Event) {
 
 	req, err := http.NewRequest(http.MethodPost, ws.url.String(), bytes.NewReader(payload))
 	if err != nil {
-		logger.Error("error creating request", "error", err)
+		logger.Errorw("Error creating request", "error", err)
 		return
 	}
 
@@ -682,12 +679,12 @@ func (ws *webhookEventPrinter) Print(event trace.Event) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.Error("error sending webhook", "error", err)
+		logger.Errorw("Error sending webhook", "error", err)
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Error(fmt.Sprintf("error sending webhook, http status: %d", resp.StatusCode))
+		logger.Errorw(fmt.Sprintf("Error sending webhook, http status: %d", resp.StatusCode))
 	}
 
 	_ = resp.Body.Close()

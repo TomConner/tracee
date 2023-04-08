@@ -15,8 +15,8 @@ type K8sApiConnection struct {
 	apiAddressContainerId map[string]string
 }
 
-func (sig *K8sApiConnection) Init(cb detect.SignatureHandler) error {
-	sig.cb = cb
+func (sig *K8sApiConnection) Init(ctx detect.SignatureContext) error {
+	sig.cb = ctx.Callback
 	sig.apiAddressContainerId = make(map[string]string)
 
 	return nil
@@ -51,7 +51,7 @@ func (sig *K8sApiConnection) OnEvent(event protocol.Event) error {
 		return fmt.Errorf("failed to cast event's payload")
 	}
 
-	containerID := eventObj.ContainerID
+	containerID := eventObj.Container.ID
 	if containerID == "" {
 		return nil
 	}

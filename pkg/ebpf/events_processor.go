@@ -2,6 +2,7 @@ package ebpf
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -9,12 +10,13 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/aquasecurity/libbpfgo/helpers"
-	"github.com/aquasecurity/tracee/pkg/capabilities"
-	"github.com/aquasecurity/tracee/pkg/logger"
-	"github.com/aquasecurity/tracee/pkg/utils"
 
+	"github.com/aquasecurity/tracee/pkg/capabilities"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events"
 	"github.com/aquasecurity/tracee/pkg/events/parse"
+	"github.com/aquasecurity/tracee/pkg/logger"
+	"github.com/aquasecurity/tracee/pkg/utils"
 	"github.com/aquasecurity/tracee/types/trace"
 )
 
@@ -25,15 +27,24 @@ func init() {
 	initKernelReadFileTypes()
 }
 
-func (t *Tracee) processLostEvents() {
+func (t *Tracee) processLostEvents(ctx context.Context) {
+	logger.Debugw("Starting processLostEvents go routine")
+	defer logger.Debugw("Stopped processLostEvents go routine")
+
 	for {
-		lost := <-t.lostEvChannel
-		// When terminating tracee-ebpf the lost channel receives multiple "0 lost events" events.
-		// This check prevents those 0 lost events messages to be written to stderr until the bug is fixed:
-		// https://github.com/aquasecurity/libbpfgo/issues/122
-		if lost > 0 {
-			t.stats.LostEvCount.Increment(lost)
-			logger.Warn(fmt.Sprintf("lost %d events", lost))
+		select {
+		case lost := <-t.lostEvChannel:
+			// When terminating tracee-ebpf the lost channel receives multiple "0 lost events" events.
+			// This check prevents those 0 lost events messages to be written to stderr until the bug is fixed:
+			// https://github.com/aquasecurity/libbpfgo/issues/122
+			if lost > 0 {
+				if err := t.stats.LostEvCount.Increment(lost); err != nil {
+					logger.Errorw("Incrementing lost event count", "error", err)
+				}
+				logger.Warnw(fmt.Sprintf("Lost %d events", lost))
+			}
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -50,7 +61,7 @@ func (t *Tracee) processEvent(event *trace.Event) []error {
 	for _, procFunc := range processors {
 		err := procFunc(event)
 		if err != nil {
-			logger.Error("error processing event", "event", event.EventName, "error", err)
+			logger.Errorw("Error processing event", "event", event.EventName, "error", err)
 			errs = append(errs, err)
 		}
 	}
@@ -60,7 +71,7 @@ func (t *Tracee) processEvent(event *trace.Event) []error {
 // RegisterEventProcessor registers a pipeline processing handler for an event
 func (t *Tracee) RegisterEventProcessor(id events.ID, proc func(evt *trace.Event) error) error {
 	if t.eventProcessor == nil {
-		return logger.NewErrorf("tracee not initialized yet")
+		return errfmt.Errorf("tracee not initialized yet")
 	}
 	if t.eventProcessor[id] == nil {
 		t.eventProcessor[id] = make([]func(evt *trace.Event) error, 0)
@@ -99,11 +110,11 @@ func (t *Tracee) registerEventProcessors() {
 func (t *Tracee) convertArgMonotonicToEpochTime(event *trace.Event, argName string) error {
 	relTimeArg := events.GetArg(event, argName)
 	if relTimeArg == nil {
-		return logger.NewErrorf("couldn't find argument %s of event %s", argName, event.EventName)
+		return errfmt.Errorf("couldn't find argument %s of event %s", argName, event.EventName)
 	}
 	relTime, ok := relTimeArg.Value.(uint64)
 	if !ok {
-		return logger.NewErrorf("argument %s of event %s is not of type uint64", argName, event.EventName)
+		return errfmt.Errorf("argument %s of event %s is not of type uint64", argName, event.EventName)
 	}
 	relTimeArg.Value = relTime + t.bootTime
 	return nil
@@ -116,7 +127,7 @@ func (t *Tracee) processWriteEvent(event *trace.Event) error {
 	}
 	filePath, err := parse.ArgVal[string](event, "pathname")
 	if err != nil {
-		return logger.NewErrorf("error parsing vfs_write args: %v", err)
+		return errfmt.Errorf("error parsing vfs_write args: %v", err)
 	}
 	// path should be absolute, except for e.g memfd_create files
 	if filePath == "" || filePath[0] != '/' {
@@ -124,15 +135,15 @@ func (t *Tracee) processWriteEvent(event *trace.Event) error {
 	}
 	dev, err := parse.ArgVal[uint32](event, "dev")
 	if err != nil {
-		return logger.NewErrorf("error parsing vfs_write args: %v", err)
+		return errfmt.Errorf("error parsing vfs_write args: %v", err)
 	}
 	inode, err := parse.ArgVal[uint64](event, "inode")
 	if err != nil {
-		return logger.NewErrorf("error parsing vfs_write args: %v", err)
+		return errfmt.Errorf("error parsing vfs_write args: %v", err)
 	}
 
 	// stop processing if write was already indexed
-	containerId := event.ContainerID
+	containerId := event.Container.ID
 	if containerId == "" {
 		containerId = "host"
 	}
@@ -158,7 +169,7 @@ func (t *Tracee) processSchedProcessExec(event *trace.Event) error {
 	if t.config.Capture.Exec || t.config.Output.ExecHash {
 		filePath, err := parse.ArgVal[string](event, "pathname")
 		if err != nil {
-			return logger.NewErrorf("error parsing sched_process_exec args: %v", err)
+			return errfmt.Errorf("error parsing sched_process_exec args: %v", err)
 		}
 		// Should be absolute path, except for e.g memfd_create files
 		if filePath == "" || filePath[0] != '/' {
@@ -173,11 +184,11 @@ func (t *Tracee) processSchedProcessExec(event *trace.Event) error {
 			sourceFilePath := fmt.Sprintf("/proc/%s/root%s", strconv.Itoa(int(pid)), filePath)
 			sourceFileCtime, err := parse.ArgVal[uint64](event, "ctime")
 			if err != nil {
-				return logger.NewErrorf("error parsing sched_process_exec args: %v", err)
+				return errfmt.Errorf("error parsing sched_process_exec args: %v", err)
 			}
 			castedSourceFileCtime := int64(sourceFileCtime)
 
-			containerId := event.ContainerID
+			containerId := event.Container.ID
 			if containerId == "" {
 				containerId = "host"
 			}
@@ -186,7 +197,7 @@ func (t *Tracee) processSchedProcessExec(event *trace.Event) error {
 			if t.config.Capture.Exec {
 				destinationDirPath := containerId
 				if err := utils.MkdirAtExist(t.outDir, destinationDirPath, 0755); err != nil {
-					return logger.ErrorFunc(err)
+					return errfmt.WrapError(err)
 				}
 				destinationFilePath := filepath.Join(destinationDirPath, fmt.Sprintf("exec.%d.%s", event.Timestamp, filepath.Base(filePath)))
 				// don't capture same file twice unless it was modified
@@ -202,7 +213,7 @@ func (t *Tracee) processSchedProcessExec(event *trace.Event) error {
 						)
 					})
 					if err != nil {
-						return logger.ErrorFunc(err)
+						return errfmt.WrapError(err)
 					}
 
 					// mark this file as captured
@@ -223,7 +234,7 @@ func (t *Tracee) processSchedProcessExec(event *trace.Event) error {
 				} else {
 
 					// ring1
-					capabilities.GetInstance().Required(func() error {
+					err = capabilities.GetInstance().Required(func() error {
 						currentHash, err = computeFileHashAtPath(sourceFilePath)
 						if err == nil {
 							hashInfoObj = fileExecInfo{castedSourceFileCtime, currentHash}
@@ -231,7 +242,9 @@ func (t *Tracee) processSchedProcessExec(event *trace.Event) error {
 						}
 						return nil
 					})
-
+					if err != nil {
+						logger.Errorw("Requiring capabilities", "error", err)
+					}
 				}
 				event.Args = append(event.Args, trace.Argument{
 					ArgMeta: trace.ArgMeta{Name: "sha256", Type: "const char*"},
@@ -243,7 +256,7 @@ func (t *Tracee) processSchedProcessExec(event *trace.Event) error {
 				break
 			}
 		}
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 	return nil
 }
@@ -255,15 +268,15 @@ func (t *Tracee) processSchedProcessFork(event *trace.Event) error {
 func (t *Tracee) processCgroupMkdir(event *trace.Event) error {
 	cgroupId, err := parse.ArgVal[uint64](event, "cgroup_id")
 	if err != nil {
-		return logger.NewErrorf("error parsing cgroup_mkdir args: %v", err)
+		return errfmt.Errorf("error parsing cgroup_mkdir args: %v", err)
 	}
 	path, err := parse.ArgVal[string](event, "cgroup_path")
 	if err != nil {
-		return logger.NewErrorf("error parsing cgroup_mkdir args: %v", err)
+		return errfmt.Errorf("error parsing cgroup_mkdir args: %v", err)
 	}
 	hId, err := parse.ArgVal[uint32](event, "hierarchy_id")
 	if err != nil {
-		return logger.NewErrorf("error parsing cgroup_mkdir args: %v", err)
+		return errfmt.Errorf("error parsing cgroup_mkdir args: %v", err)
 	}
 	info, err := t.containers.CgroupMkdir(cgroupId, path, hId)
 	if err == nil && info.Container.ContainerId == "" {
@@ -275,21 +288,21 @@ func (t *Tracee) processCgroupMkdir(event *trace.Event) error {
 			// it is not a container cgroup and, as a systemd cgroup, could have been
 			// created and removed very quickly.
 			// In this case, we don't want to return an error.
-			logger.Debug("failed to remove entry from containers bpf map", "error", err)
+			logger.Debugw("Failed to remove entry from containers bpf map", "error", err)
 		}
 	}
-	return logger.ErrorFunc(err)
+	return errfmt.WrapError(err)
 }
 
 func (t *Tracee) processCgroupRmdir(event *trace.Event) error {
 	cgroupId, err := parse.ArgVal[uint64](event, "cgroup_id")
 	if err != nil {
-		return logger.NewErrorf("error parsing cgroup_rmdir args: %v", err)
+		return errfmt.Errorf("error parsing cgroup_rmdir args: %v", err)
 	}
 
 	hId, err := parse.ArgVal[uint32](event, "hierarchy_id")
 	if err != nil {
-		return logger.NewErrorf("error parsing cgroup_mkdir args: %v", err)
+		return errfmt.Errorf("error parsing cgroup_mkdir args: %v", err)
 	}
 	t.containers.CgroupRemove(cgroupId, hId)
 	return nil
@@ -306,7 +319,7 @@ func (t *Tracee) processDoInitModule(event *trace.Event) error {
 	if okSyscalls || okSeqOps || okProcFops {
 		err := t.UpdateKallsyms()
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 		if okSyscalls {
 			t.triggerSyscallsIntegrityCheck(*event)
@@ -317,7 +330,7 @@ func (t *Tracee) processDoInitModule(event *trace.Event) error {
 		if okMemDump {
 			err := t.triggerMemDump(*event)
 			if err != nil {
-				logger.Warn("memory dump", "error", err)
+				logger.Warnw("Memory dump", "error", err)
 			}
 		}
 	}
@@ -327,7 +340,7 @@ func (t *Tracee) processDoInitModule(event *trace.Event) error {
 func (t *Tracee) processHookedProcFops(event *trace.Event) error {
 	fopsAddresses, err := parse.ArgVal[[]uint64](event, "hooked_fops_pointers")
 	if err != nil || fopsAddresses == nil {
-		return logger.NewErrorf("error parsing hooked_proc_fops args: %v", err)
+		return errfmt.Errorf("error parsing hooked_proc_fops args: %v", err)
 	}
 	hookedFops := make([]trace.HookedSymbolData, 0)
 	for idx, addr := range fopsAddresses {
@@ -358,10 +371,10 @@ func (t *Tracee) processTriggeredEvent(event *trace.Event) error {
 	}
 	withInvokingContext, err := t.triggerContexts.Apply(*event)
 	if err != nil {
-		return logger.NewErrorf("failed to apply invoke context on %s event: %s", event.EventName, err)
+		return errfmt.Errorf("failed to apply invoke context on %s event: %s", event.EventName, err)
 	}
 	// This was previously event = &withInvokingContext. However, if applied
-	// as such, withInvokingContext will go out of scope and the reference
+	// as such, withInvokingContext will go out of policy and the reference
 	// will be moved back as such we apply the value internally and not
 	// through a reference switch
 	(*event) = withInvokingContext
@@ -442,11 +455,11 @@ func processKernelReadFile(event *trace.Event) error {
 	readTypeArg := events.GetArg(event, "type")
 	readTypeInt, ok := readTypeArg.Value.(int32)
 	if !ok {
-		return logger.NewErrorf("missing argument %s in event %s", "type", event.EventName)
+		return errfmt.Errorf("missing argument %s in event %s", "type", event.EventName)
 	}
 	readType, idExists := kernelReadFileTypes[readTypeInt]
 	if !idExists {
-		return logger.NewErrorf("kernelReadFileId doesn't exist in kernelReadFileType map")
+		return errfmt.Errorf("kernelReadFileId doesn't exist in kernelReadFileType map")
 	}
 	readTypeArg.Value = readType
 	return nil
@@ -455,18 +468,19 @@ func processKernelReadFile(event *trace.Event) error {
 func (t *Tracee) processPrintMemDump(event *trace.Event) error {
 	address, err := parse.ArgVal[uintptr](event, "address")
 	if err != nil || address == 0 {
-		return logger.NewErrorf("error parsing print_mem_dump args: %v", err)
+		return errfmt.Errorf("error parsing print_mem_dump args: %v", err)
 	}
+
 	addressUint64 := uint64(address)
 	symbol := utils.ParseSymbol(addressUint64, t.kernelSymbols)
 	var utsName unix.Utsname
 	arch := ""
-	unix.Uname(&utsName)
-	if err == nil {
-		arch = string(bytes.TrimRight(utsName.Machine[:], "\x00"))
+	if err := unix.Uname(&utsName); err != nil {
+		return errfmt.WrapError(err)
 	}
-	event.Args = append(event.Args, trace.Argument{ArgMeta: trace.ArgMeta{Name: "arch", Type: "char*"}, Value: arch})
-	event.Args = append(event.Args, trace.Argument{ArgMeta: trace.ArgMeta{Name: "symbol_name", Type: "char*"}, Value: symbol.Name})
-	event.Args = append(event.Args, trace.Argument{ArgMeta: trace.ArgMeta{Name: "symbol_owner", Type: "char*"}, Value: symbol.Owner})
+	arch = string(bytes.TrimRight(utsName.Machine[:], "\x00"))
+	event.Args[4].Value = arch
+	event.Args[5].Value = symbol.Name
+	event.Args[6].Value = symbol.Owner
 	return nil
 }

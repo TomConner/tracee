@@ -1,15 +1,15 @@
 package flags
 
 import (
-	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/aquasecurity/libbpfgo/helpers"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events"
 	"github.com/aquasecurity/tracee/pkg/filters"
-	"github.com/aquasecurity/tracee/pkg/filterscope"
 	"github.com/aquasecurity/tracee/pkg/logger"
+	"github.com/aquasecurity/tracee/pkg/policy"
 )
 
 func filterHelp() string {
@@ -87,131 +87,32 @@ Examples:
   --filter security_file_open.context.container                 | only trace 'security_file_open' events coming from a container
   --filter comm=bash --filter follow                            | trace all events that originated from bash or from one of the processes spawned by bash
 
-Filters can also be configured within up to 64 scopes (workloads).
-Events that match all filter expressions within a single scope will be filtered.
-To find out which scopes an event is related to, read the bitmask in one of these ways:
-
-- using '-o format:json', matchedScopes JSON field (in decimal)
-- using '-o format:table-verbose', SCOPES column (in hexadecimal)
-
-Examples:
-
-  -f 42:event=sched_process_exec -f 42:binary=/usr/bin/ls      | trace in scope 42 sched_process_exec event from /usr/bin/ls binary
-
-  -f 3:event=openat -f 3:comm=id -f 9:event=close -f 9:comm=ls - trace in scope 3 only openat event from id command
-                                                               | and
-                                                               - trace in scope 9 only close event from ls command
-
-  -f 6:event=openat -f 6:comm=id -f 7:event=close -f 7:comm=id - trace in scope 6 only openat event from id command
-                                                               | and
-                                                               _ trace in scope 7 only close event from id command
-
-  -f 3:event=openat -f 3:comm=id -f 9:event=close              - trace in scope 3 only openat event from id command
-                                                               | and
-                                                               - trace in scope 9 only close event from all
-
 Note: some of the above operators have special meanings in different shells.
 To 'escape' those operators, please use single quotes, e.g.: 'uid>0', '/tmp*'
 `
 }
 
-// filterFlag holds pre-parsed filter flag fields
-type filterFlag struct {
-	full              string
-	filterName        string
-	operatorAndValues string
-	scopeIdx          int
-}
-
-func parseFilterFlag(flag string) (*filterFlag, error) {
-	var (
-		scopeID           int // stores the parsed scope index, not its flag position
-		filterName        string
-		operatorAndValues string
-
-		scopeEndIdx      int // stores ':' flag index (end of the scope value)
-		filterNameIdx    int
-		filterNameEndIdx int
-		operatorIdx      int
-		err              error
-	)
-
-	scopeEndIdx = strings.Index(flag, ":")
-	operatorIdx = strings.IndexAny(flag, "=!<>")
-
-	if scopeEndIdx == -1 && operatorIdx == -1 {
-		return &filterFlag{
-			full:              flag,
-			filterName:        flag,
-			operatorAndValues: "",
-			scopeIdx:          scopeID,
-		}, nil
-	}
-
-	if operatorIdx != -1 {
-		operatorAndValues = flag[operatorIdx:]
-		filterNameEndIdx = operatorIdx
-	} else {
-		operatorIdx = len(flag) - 1
-		filterNameEndIdx = len(flag)
-	}
-
-	// check operators
-	if len(operatorAndValues) == 1 ||
-		operatorAndValues == "!=" ||
-		operatorAndValues == "<=" ||
-		operatorAndValues == ">=" {
-
-		return nil, filters.InvalidExpression(flag)
-	}
-
-	if scopeEndIdx != -1 && scopeEndIdx < operatorIdx {
-		// parse its ID
-		scopeID, err = strconv.Atoi(flag[:scopeEndIdx])
+func PrepareFilterMapFromFlags(filtersArr []string) (FilterMap, error) {
+	// parse and store filters by policy
+	filterMap := make(FilterMap)
+	for _, filter := range filtersArr {
+		parsed, err := parseFilterFlag(filter)
 		if err != nil {
-			return nil, filters.InvalidScope(fmt.Sprintf("%s - %s", flag, err))
+			return nil, err
 		}
 
-		// now consider it as a scope index
-		scopeID--
-		if scopeID < 0 || scopeID > filterscope.MaxFilterScopes-1 {
-			return nil, filters.InvalidScope(fmt.Sprintf("%s - scopes must be between 1 and %d", flag, filterscope.MaxFilterScopes))
-		}
+		policyIdx := parsed.policyIdx
 
-		filterNameIdx = scopeEndIdx + 1
+		filterMap[policyIdx] = append(
+			filterMap[policyIdx],
+			parsed,
+		)
 	}
 
-	if len(operatorAndValues) >= 2 &&
-		operatorAndValues[0] == '!' &&
-		operatorAndValues[1] != '=' {
-
-		filterName = flag[filterNameIdx:]
-		if strings.HasSuffix(filterName, "follow") ||
-			strings.HasSuffix(filterName, "container") {
-
-			return &filterFlag{
-				full:              flag,
-				filterName:        filterName,
-				operatorAndValues: "",
-				scopeIdx:          scopeID,
-			}, nil
-		}
-
-		return nil, filters.InvalidExpression(flag)
-	}
-
-	// parse filter name
-	filterName = flag[filterNameIdx:filterNameEndIdx]
-
-	return &filterFlag{
-		full:              flag,
-		filterName:        filterName,
-		operatorAndValues: operatorAndValues,
-		scopeIdx:          scopeID,
-	}, nil
+	return filterMap, nil
 }
 
-func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error) {
+func CreatePolicies(filterMap FilterMap) (*policy.Policies, error) {
 	eventsNameToID := events.Definitions.NamesToIDs()
 	// remove internal events since they shouldn't be accessible by users
 	for event, id := range eventsNameToID {
@@ -220,24 +121,9 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 		}
 	}
 
-	// parse and store filters by scope
-	parsedMap := map[int][]*filterFlag{}
-	for _, filter := range filtersArr {
-		parsed, err := parseFilterFlag(filter)
-		if err != nil {
-			return nil, err
-		}
-
-		scopeIdx := parsed.scopeIdx
-		parsedMap[scopeIdx] = append(
-			parsedMap[scopeIdx],
-			parsed,
-		)
-	}
-
-	filterScopes := filterscope.NewFilterScopes()
-	for scopeIdx, fsFlags := range parsedMap {
-		filterScope := filterscope.NewFilterScope()
+	policies := policy.NewPolicies()
+	for _, fsFlags := range filterMap {
+		p := policy.NewPolicy()
 		eventFilter := cliFilter{
 			Equal:    []string{},
 			NotEqual: []string{},
@@ -248,8 +134,11 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 		}
 
 		for _, filterFlag := range fsFlags {
+			p.ID = filterFlag.policyIdx
+			p.Name = filterFlag.policyName
+
 			if strings.Contains(filterFlag.full, ".retval") {
-				err := filterScope.RetFilter.Parse(filterFlag.filterName, filterFlag.operatorAndValues, eventsNameToID)
+				err := p.RetFilter.Parse(filterFlag.filterName, filterFlag.operatorAndValues, eventsNameToID)
 				if err != nil {
 					return nil, err
 				}
@@ -257,7 +146,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			}
 
 			if strings.Contains(filterFlag.full, ".context") {
-				err := filterScope.ContextFilter.Parse(filterFlag.filterName, filterFlag.operatorAndValues)
+				err := p.ContextFilter.Parse(filterFlag.filterName, filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -265,7 +154,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			}
 
 			if strings.Contains(filterFlag.full, ".args") {
-				err := filterScope.ArgFilter.Parse(filterFlag.filterName, filterFlag.operatorAndValues, eventsNameToID)
+				err := p.ArgFilter.Parse(filterFlag.filterName, filterFlag.operatorAndValues, eventsNameToID)
 				if err != nil {
 					return nil, err
 				}
@@ -276,7 +165,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			// Other filters should be given using their full name.
 			// To avoid collisions between filters that share the same prefix, put the filters which should have an exact match first!
 			if filterFlag.filterName == "comm" {
-				err := filterScope.CommFilter.Parse(filterFlag.operatorAndValues)
+				err := p.CommFilter.Parse(filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -284,7 +173,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			}
 
 			if filterFlag.filterName == "binary" || filterFlag.filterName == "bin" {
-				err := filterScope.BinaryFilter.Parse(filterFlag.operatorAndValues)
+				err := p.BinaryFilter.Parse(filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -293,31 +182,31 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 
 			if strings.HasPrefix("container", filterFlag.filterName) {
 				if filterFlag.operatorAndValues == "=new" {
-					err := filterScope.NewContFilter.Parse("new")
+					err := p.NewContFilter.Parse("new")
 					if err != nil {
 						return nil, err
 					}
 					continue
 				}
 				if filterFlag.operatorAndValues == "!=new" {
-					err := filterScope.ContFilter.Parse(filterFlag.filterName)
+					err := p.ContFilter.Parse(filterFlag.filterName)
 					if err != nil {
 						return nil, err
 					}
-					err = filterScope.NewContFilter.Parse("!new")
+					err = p.NewContFilter.Parse("!new")
 					if err != nil {
 						return nil, err
 					}
 					continue
 				}
 				if strings.Contains(filterFlag.operatorAndValues, "=") {
-					err := filterScope.ContIDFilter.Parse(filterFlag.operatorAndValues)
+					err := p.ContIDFilter.Parse(filterFlag.operatorAndValues)
 					if err != nil {
 						return nil, err
 					}
 					continue
 				}
-				err := filterScope.ContFilter.Parse(filterFlag.filterName)
+				err := p.ContFilter.Parse(filterFlag.filterName)
 				if err != nil {
 					return nil, err
 				}
@@ -325,7 +214,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			}
 
 			if strings.HasPrefix("!container", filterFlag.filterName) {
-				err := filterScope.ContFilter.Parse(filterFlag.filterName)
+				err := p.ContFilter.Parse(filterFlag.filterName)
 				if err != nil {
 					return nil, err
 				}
@@ -344,7 +233,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 				if strings.ContainsAny(filterFlag.operatorAndValues, "<>") {
 					return nil, filters.InvalidExpression(filterFlag.operatorAndValues)
 				}
-				err := filterScope.MntNSFilter.Parse(filterFlag.operatorAndValues)
+				err := p.MntNSFilter.Parse(filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -355,7 +244,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 				if strings.ContainsAny(filterFlag.operatorAndValues, "<>") {
 					return nil, filters.InvalidExpression(filterFlag.operatorAndValues)
 				}
-				err := filterScope.PidNSFilter.Parse(filterFlag.operatorAndValues)
+				err := p.PidNSFilter.Parse(filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -363,7 +252,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			}
 
 			if filterFlag.filterName == "tree" {
-				err := filterScope.ProcessTreeFilter.Parse(filterFlag.operatorAndValues)
+				err := p.ProcessTreeFilter.Parse(filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -372,14 +261,18 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 
 			if strings.HasPrefix("pid", filterFlag.filterName) {
 				if filterFlag.operatorAndValues == "=new" {
-					filterScope.NewPidFilter.Parse("new")
+					if err := p.NewPidFilter.Parse("new"); err != nil {
+						return nil, err
+					}
 					continue
 				}
 				if filterFlag.operatorAndValues == "!=new" {
-					filterScope.NewPidFilter.Parse("!new")
+					if err := p.NewPidFilter.Parse("!new"); err != nil {
+						return nil, err
+					}
 					continue
 				}
-				err := filterScope.PIDFilter.Parse(filterFlag.operatorAndValues)
+				err := p.PIDFilter.Parse(filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -395,7 +288,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			}
 
 			if filterFlag.filterName == "uts" {
-				err := filterScope.UTSFilter.Parse(filterFlag.operatorAndValues)
+				err := p.UTSFilter.Parse(filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -403,7 +296,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			}
 
 			if strings.HasPrefix("uid", filterFlag.filterName) {
-				err := filterScope.UIDFilter.Parse(filterFlag.operatorAndValues)
+				err := p.UIDFilter.Parse(filterFlag.operatorAndValues)
 				if err != nil {
 					return nil, err
 				}
@@ -411,7 +304,7 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 			}
 
 			if strings.HasPrefix("follow", filterFlag.filterName) {
-				filterScope.Follow = true
+				p.Follow = true
 				continue
 			}
 
@@ -419,19 +312,19 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 		}
 
 		var err error
-		filterScope.EventsToTrace, err = prepareEventsToTrace(eventFilter, setFilter, eventsNameToID)
+		p.EventsToTrace, err = prepareEventsToTrace(eventFilter, setFilter, eventsNameToID)
 		if err != nil {
 			return nil, err
 		}
 
-		err = filterScopes.Set(scopeIdx, filterScope)
+		err = policies.Set(p)
 		if err != nil {
-			logger.Warn("Setting scope", "error", err)
+			logger.Warnw("Setting policy", "error", err)
 		}
 	}
 
-	if len(filterScopes.Map()) == 0 {
-		// If nothing was set, let us consider it as a single default scope
+	if len(policies.Map()) == 0 {
+		// If nothing was set, let us consider it as a single default policy
 		eventFilter := cliFilter{
 			Equal:    []string{},
 			NotEqual: []string{},
@@ -442,19 +335,19 @@ func PrepareFilterScopes(filtersArr []string) (*filterscope.FilterScopes, error)
 		}
 
 		var err error
-		newScope := filterscope.NewFilterScope()
-		newScope.EventsToTrace, err = prepareEventsToTrace(eventFilter, setFilter, eventsNameToID)
+		newPolicy := policy.NewPolicy()
+		newPolicy.EventsToTrace, err = prepareEventsToTrace(eventFilter, setFilter, eventsNameToID)
 		if err != nil {
 			return nil, err
 		}
 
-		err = filterScopes.Add(newScope)
+		err = policies.Add(newPolicy)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	return filterScopes, nil
+	return policies, nil
 }
 
 func prepareEventsToTrace(
@@ -483,13 +376,13 @@ func prepareEventsToTrace(
 	if osInfo, err := helpers.GetOSInfo(); err == nil {
 		kernel51ComparedToRunningKernel, err := osInfo.CompareOSBaseKernelRelease("5.1.0")
 		if err != nil {
-			logger.Error("failed to compare kernel version", "error", err)
+			logger.Errorw("Failed to compare kernel version", "error", err)
 		} else {
 			if kernel51ComparedToRunningKernel == helpers.KernelVersionNewer {
 				id_like := osInfo.GetOSReleaseFieldValue(helpers.OS_ID_LIKE)
 				if !strings.Contains(id_like, "rhel") {
 					// disable network events for v4.19 kernels other than RHEL based ones
-					logger.Debug("kernel <= v5.1, disabling network events from default set")
+					logger.Debugw("Kernel <= v5.1, disabling network events from default set")
 					for _, id := range setsToEvents["default"] {
 						if id >= events.NetPacketIPv4 && id <= events.MaxUserNetID {
 							isExcluded[id] = true
@@ -499,7 +392,7 @@ func prepareEventsToTrace(
 			}
 		}
 	} else {
-		logger.Error("failed to get OS info", "error", err)
+		logger.Errorw("Failed to get OS info", "error", err)
 	}
 
 	// mark excluded events (isExcluded) by their id
@@ -581,7 +474,7 @@ func (filter *cliFilter) Parse(operatorAndValues string) error {
 
 	if operatorString == "!" {
 		if len(operatorAndValues) < 3 {
-			return logger.NewErrorf("invalid operator and/or values given to filter: %s", operatorAndValues)
+			return errfmt.Errorf("invalid operator and/or values given to filter: %s", operatorAndValues)
 		}
 		operatorString = operatorAndValues[0:2]
 		valuesString = operatorAndValues[2:]
@@ -596,7 +489,7 @@ func (filter *cliFilter) Parse(operatorAndValues string) error {
 		case "!=":
 			filter.NotEqual = append(filter.NotEqual, values[i])
 		default:
-			return logger.NewErrorf("invalid filter operator: %s", operatorString)
+			return errfmt.Errorf("invalid filter operator: %s", operatorString)
 		}
 	}
 

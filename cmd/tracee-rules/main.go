@@ -11,33 +11,17 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/open-policy-agent/opa/compile"
+	"github.com/urfave/cli/v2"
+	"kernel.org/pub/linux/libs/security/libcap/cap"
+
 	"github.com/aquasecurity/tracee/pkg/capabilities"
 	"github.com/aquasecurity/tracee/pkg/cmd/flags/server"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/pkg/signatures/engine"
 	"github.com/aquasecurity/tracee/pkg/signatures/signature"
 	"github.com/aquasecurity/tracee/types/detect"
-
-	"github.com/open-policy-agent/opa/compile"
-	"github.com/urfave/cli/v2"
-	"kernel.org/pub/linux/libs/security/libcap/cap"
 )
-
-func init() {
-	// Avoiding to override package-level logger
-	// when it's already set by logger environment variables
-	if !logger.IsSetFromEnv() {
-		// Logger Setup
-		logger.Init(
-			&logger.LoggerConfig{
-				Writer:    os.Stderr,
-				Level:     logger.InfoLevel,
-				Encoder:   logger.NewJSONEncoder(logger.NewProductionConfig().EncoderConfig),
-				Aggregate: false,
-			},
-		)
-	}
-}
 
 const (
 	signatureBufferFlag = "sig-buffer"
@@ -48,6 +32,9 @@ func main() {
 		Name:  "tracee-rules",
 		Usage: "A rule engine for Runtime Security",
 		Action: func(c *cli.Context) error {
+
+			// Logger Setup
+			logger.Init(logger.NewDefaultLoggingConfig())
 
 			// Capabilities command line flags
 
@@ -60,7 +47,9 @@ func main() {
 			}
 
 			if c.NumFlags() == 0 {
-				cli.ShowAppHelp(c)
+				if err = cli.ShowAppHelp(c); err != nil {
+					logger.Errorw("Failed to show app help", "error", err)
+				}
 				return errors.New("no flags specified")
 			}
 
@@ -86,12 +75,12 @@ func main() {
 			}
 
 			var loadedSigIDs []string
-			capabilities.GetInstance().Requested(
+			err = capabilities.GetInstance().Requested(
 				func() error {
 					for _, s := range sigs {
 						m, err := s.GetMetadata()
 						if err != nil {
-							logger.Error("Failed to load signature", "error", err)
+							logger.Errorw("Failed to load signature", "error", err)
 							continue
 						}
 						loadedSigIDs = append(loadedSigIDs, m.ID)
@@ -100,12 +89,16 @@ func main() {
 				},
 				cap.DAC_OVERRIDE,
 			)
+			if err != nil {
+				logger.Errorw("Requested capabilities", "error", err)
+			}
+
 			if c.Bool("list-events") {
 				listEvents(os.Stdout, sigs)
 				return nil
 			}
 
-			logger.Info("Signatures loaded", "total", len(loadedSigIDs), "signatures", loadedSigIDs)
+			logger.Infow("Signatures loaded", "total", len(loadedSigIDs), "signatures", loadedSigIDs)
 
 			if c.Bool("list") {
 				listSigs(os.Stdout, sigs)
@@ -153,18 +146,19 @@ func main() {
 				c.Bool(server.MetricsEndpointFlag),
 				c.Bool(server.HealthzEndpointFlag),
 				c.Bool(server.PProfEndpointFlag),
+				c.Bool(server.PyroscopeAgentFlag),
 			)
 
 			if err != nil {
 				return err
 			}
 
-			if httpServer != nil {
-				go httpServer.Start()
-			}
-
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+
+			if httpServer != nil {
+				go httpServer.Start(ctx)
+			}
 
 			e.Start(ctx)
 
@@ -213,6 +207,11 @@ func main() {
 				Value: false,
 			},
 			&cli.BoolFlag{
+				Name:  server.PyroscopeAgentFlag,
+				Usage: "enable pyroscope agent",
+				Value: false,
+			},
+			&cli.BoolFlag{
 				Name:  "rego-aio",
 				Usage: "compile rego signatures altogether as an aggregate policy. By default each signature is compiled separately.",
 			},
@@ -254,7 +253,7 @@ func main() {
 	}
 	err := app.Run(os.Args)
 	if err != nil {
-		logger.Fatal("app", "error", err)
+		logger.Fatalw("App", "error", err)
 	}
 }
 

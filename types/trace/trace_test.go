@@ -7,8 +7,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/aquasecurity/tracee/types/protocol"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/aquasecurity/tracee/types/protocol"
 )
 
 func TestEventUnmarshalJSON(t *testing.T) {
@@ -139,7 +140,7 @@ func TestEvent_Origin(t *testing.T) {
 				EventName:     "execve",
 				HostProcessID: 321,
 				ProcessID:     123,
-				ContainerID:   "ab123",
+				Container:     Container{ID: "ab123"},
 				ContextFlags:  ContextFlags{ContainerStarted: true},
 			},
 			expected: ContainerOrigin,
@@ -147,7 +148,7 @@ func TestEvent_Origin(t *testing.T) {
 		{
 			event: Event{
 				EventName:    "runc",
-				ContainerID:  "ab123",
+				Container:    Container{ID: "ab123"},
 				ContextFlags: ContextFlags{ContainerStarted: false},
 			},
 			expected: ContainerInitOrigin,
@@ -216,7 +217,7 @@ func TestEvent_ToProtocol(t *testing.T) {
 		{
 			payload: Event{
 				EventName:    "open",
-				ContainerID:  "abc123",
+				Container:    Container{ID: "abc123"},
 				ContextFlags: ContextFlags{ContainerStarted: false},
 			},
 			expected: protocol.Event{
@@ -229,7 +230,7 @@ func TestEvent_ToProtocol(t *testing.T) {
 				},
 				Payload: Event{
 					EventName:    "open",
-					ContainerID:  "abc123",
+					Container:    Container{ID: "abc123"},
 					ContextFlags: ContextFlags{ContainerStarted: false},
 				},
 			},

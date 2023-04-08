@@ -1,8 +1,8 @@
 package ebpf
 
 import (
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events"
-	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/trace"
 )
@@ -13,12 +13,12 @@ func FindingToEvent(f detect.Finding) (*trace.Event, error) {
 	s, ok := f.Event.Payload.(trace.Event)
 
 	if !ok {
-		return nil, logger.NewErrorf("error converting finding to event: %s", f.SigMetadata.ID)
+		return nil, errfmt.Errorf("error converting finding to event: %s", f.SigMetadata.ID)
 	}
 
 	eventID, found := events.Definitions.GetID(f.SigMetadata.EventName)
 	if !found {
-		return nil, logger.NewErrorf("error finding event not found: %s", f.SigMetadata.EventName)
+		return nil, errfmt.Errorf("error finding event not found: %s", f.SigMetadata.EventName)
 	}
 
 	return newEvent(int(eventID), f, s), nil
@@ -30,7 +30,7 @@ func newEvent(id int, f detect.Finding, s trace.Event) *trace.Event {
 
 	return &trace.Event{
 		EventID:             id,
-		EventName:           f.SigMetadata.Name,
+		EventName:           f.SigMetadata.EventName,
 		Timestamp:           s.Timestamp,
 		ThreadStartTime:     s.ThreadStartTime,
 		ProcessorID:         s.ProcessorID,
@@ -46,16 +46,12 @@ func newEvent(id int, f detect.Finding, s trace.Event) *trace.Event {
 		PIDNS:               s.PIDNS,
 		ProcessName:         s.ProcessName,
 		HostName:            s.HostName,
-		ContainerID:         s.ContainerID,
-		ContainerImage:      s.ContainerImage,
-		ContainerName:       s.ContainerName,
-		PodName:             s.PodName,
-		PodNamespace:        s.PodNamespace,
-		PodUID:              s.PodUID,
+		Container:           s.Container,
+		Kubernetes:          s.Kubernetes,
 		ReturnValue:         s.ReturnValue,
 		StackAddresses:      s.StackAddresses,
 		ContextFlags:        s.ContextFlags,
-		MatchedScopes:       s.MatchedScopes,
+		MatchedPolicies:     s.MatchedPolicies,
 		ArgsNum:             len(arguments),
 		Args:                arguments,
 		Metadata:            metadata,

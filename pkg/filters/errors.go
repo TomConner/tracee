@@ -6,8 +6,8 @@ func UnsupportedOperator(op Operator) error {
 	return fmt.Errorf("failed to add filter: unsupported operator %s", op.String())
 }
 
-func InvalidScope(filterScope string) error {
-	return fmt.Errorf("invalid filter scope: %s", filterScope)
+func InvalidPolicy(policy string) error {
+	return fmt.Errorf("invalid policy: %s", policy)
 }
 
 func InvalidExpression(expression string) error {
@@ -31,5 +31,5 @@ func InvalidContextField(field string) error {
 }
 
 func FailedToRetreiveHostNS() error {
-	return fmt.Errorf("failed to retreive host mount namespace")
+	return fmt.Errorf("failed to retrieve host mount namespace")
 }

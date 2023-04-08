@@ -6,7 +6,7 @@ import (
 
 	"github.com/aquasecurity/tracee/pkg/cmd/printer"
 	tracee "github.com/aquasecurity/tracee/pkg/ebpf"
-	"github.com/aquasecurity/tracee/pkg/logger"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 )
 
 func traceeEbpfOutputHelp() string {
@@ -18,7 +18,6 @@ Possible options:
 [format:]gob                                       output events in gob format
 [format:]gotemplate=/path/to/template              output events formatted using a given gotemplate file
 out-file:/path/to/file                             write the output to a specified file. create/trim the file if exists (default: stdout)
-log-file:/path/to/file                             write the logs to a specified file. create/trim the file if exists (default: stderr)
 none                                               ignore stream of events output, usually used with --capture
 option:{stack-addresses,exec-env,relative-time,exec-hash,parse-arguments,sort-events}
                                                    augment output according to given options (default: none)
@@ -43,7 +42,6 @@ func TraceeEbpfPrepareOutput(outputSlice []string) (OutputConfig, error) {
 	traceeConfig := &tracee.OutputConfig{}
 
 	var outPath string
-	var logPath string
 
 	printerKind := "table"
 
@@ -65,22 +63,22 @@ func TraceeEbpfPrepareOutput(outputSlice []string) (OutputConfig, error) {
 			}
 		case "out-file":
 			outPath = outputParts[1]
-		case "log-file":
-			logPath = outputParts[1]
 		case "option":
 			err := setOption(traceeConfig, outputParts[1])
 			if err != nil {
 				return outConfig, err
 			}
 		default:
-			return outConfig, logger.NewErrorf("invalid output value: %s, use '--output help' for more info", outputParts[1])
+			return outConfig, errfmt.Errorf("invalid output value: %s, use '--output help' for more info", outputParts[1])
 		}
 	}
 
 	printerConfigs := make([]printer.Config, 0)
 
 	if printerKind == "table" {
-		setOption(traceeConfig, "parse-arguments")
+		if err := setOption(traceeConfig, "parse-arguments"); err != nil {
+			return outConfig, err
+		}
 	}
 
 	if outPath == "" {
@@ -107,17 +105,6 @@ func TraceeEbpfPrepareOutput(outputSlice []string) (OutputConfig, error) {
 		printerConfigs = append(printerConfigs, printerConfig)
 	}
 
-	if logPath == "" {
-		outConfig.LogFile = os.Stderr
-	} else {
-		file, err := createFile(logPath)
-		if err != nil {
-			return outConfig, err
-		}
-
-		outConfig.LogFile = file
-	}
-
 	outConfig.TraceeConfig = traceeConfig
 	outConfig.PrinterConfigs = printerConfigs
 
@@ -130,7 +117,7 @@ func validateFormat(printerKind string) error {
 		printerKind != "json" &&
 		printerKind != "gob" &&
 		!strings.HasPrefix(printerKind, "gotemplate=") {
-		return logger.NewErrorf("unrecognized output format: %s. Valid format values: 'table', 'table-verbose', 'json', 'gob' or 'gotemplate='. Use '--output help' for more info", printerKind)
+		return errfmt.Errorf("unrecognized output format: %s. Valid format values: 'table', 'table-verbose', 'json', 'gob' or 'gotemplate='. Use '--output help' for more info", printerKind)
 	}
 
 	return nil

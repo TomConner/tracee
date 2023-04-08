@@ -9,14 +9,16 @@ import (
 	"os"
 	"strings"
 
+	"kernel.org/pub/linux/libs/security/libcap/cap"
+
 	"github.com/aquasecurity/tracee/pkg/capabilities"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/protocol"
 	"github.com/aquasecurity/tracee/types/trace"
-	"kernel.org/pub/linux/libs/security/libcap/cap"
 )
 
-var errHelp = logger.NewErrorf("user has requested help text")
+var errHelp = errfmt.Errorf("user has requested help text")
 
 type inputFormat uint8
 
@@ -41,7 +43,7 @@ func setupTraceeInputSource(opts *traceeInputOptions) (chan protocol.Event, erro
 		return setupTraceeGobInputSource(opts)
 	}
 
-	return nil, logger.NewErrorf("could not set up input source")
+	return nil, errfmt.Errorf("could not set up input source")
 }
 
 func setupTraceeGobInputSource(opts *traceeInputOptions) (chan protocol.Event, error) {
@@ -95,13 +97,15 @@ func setupTraceeGobInputSource(opts *traceeInputOptions) (chan protocol.Event, e
 				if err == io.EOF {
 					break
 				} else {
-					logger.Error("decoding event: " + err.Error())
+					logger.Errorw("Decoding event: " + err.Error())
 				}
 			} else {
 				res <- event.ToProtocol()
 			}
 		}
-		opts.inputFile.Close()
+		if err := opts.inputFile.Close(); err != nil {
+			logger.Errorw("Closing file", "error", err)
+		}
 		close(res)
 	}()
 	return res, nil
@@ -116,12 +120,14 @@ func setupTraceeJSONInputSource(opts *traceeInputOptions) (chan protocol.Event, 
 			var e trace.Event
 			err := json.Unmarshal(event, &e)
 			if err != nil {
-				logger.Error("invalid json in " + string(event) + ": " + err.Error())
+				logger.Errorw("Invalid json in " + string(event) + ": " + err.Error())
 			} else {
 				res <- e.ToProtocol()
 			}
 		}
-		opts.inputFile.Close()
+		if err := opts.inputFile.Close(); err != nil {
+			logger.Errorw("Closing file", "error", err)
+		}
 		close(res)
 	}()
 	return res, nil
@@ -135,7 +141,7 @@ func parseTraceeInputOptions(inputOptions []string) (*traceeInputOptions, error)
 	)
 
 	if len(inputOptions) == 0 {
-		return nil, logger.NewErrorf("no tracee input options specified")
+		return nil, errfmt.Errorf("no tracee input options specified")
 	}
 
 	for i := range inputOptions {
@@ -145,23 +151,23 @@ func parseTraceeInputOptions(inputOptions []string) (*traceeInputOptions, error)
 
 		kv := strings.Split(inputOptions[i], ":")
 		if len(kv) != 2 {
-			return nil, logger.NewErrorf("invalid input-tracee option: %s", inputOptions[i])
+			return nil, errfmt.Errorf("invalid input-tracee option: %s", inputOptions[i])
 		}
 		if kv[0] == "" || kv[1] == "" {
-			return nil, logger.NewErrorf("empty key or value passed: key: >%s< value: >%s<", kv[0], kv[1])
+			return nil, errfmt.Errorf("empty key or value passed: key: >%s< value: >%s<", kv[0], kv[1])
 		}
 		if kv[0] == "file" {
 			err = parseTraceeInputFile(&inputSourceOptions, kv[1])
 			if err != nil {
-				return nil, logger.ErrorFunc(err)
+				return nil, errfmt.WrapError(err)
 			}
 		} else if kv[0] == "format" {
 			err = parseTraceeInputFormat(&inputSourceOptions, kv[1])
 			if err != nil {
-				return nil, logger.ErrorFunc(err)
+				return nil, errfmt.WrapError(err)
 			}
 		} else {
-			return nil, logger.NewErrorf("invalid input-tracee option key: %s", kv[0])
+			return nil, errfmt.Errorf("invalid input-tracee option key: %s", kv[0])
 		}
 	}
 	return &inputSourceOptions, nil
@@ -178,18 +184,18 @@ func parseTraceeInputFile(option *traceeInputOptions, fileOpt string) error {
 		func() error {
 			_, err := os.Stat(fileOpt)
 			if err != nil {
-				return logger.NewErrorf("invalid Tracee input file: %s", fileOpt)
+				return errfmt.Errorf("invalid Tracee input file: %s", fileOpt)
 			}
 			f, err = os.Open(fileOpt)
 			if err != nil {
-				return logger.NewErrorf("invalid file: %s", fileOpt)
+				return errfmt.Errorf("invalid file: %s", fileOpt)
 			}
 			return nil
 		},
 		cap.DAC_OVERRIDE,
 	)
 	if err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 	option.inputFile = f
 
@@ -205,7 +211,7 @@ func parseTraceeInputFormat(option *traceeInputOptions, formatString string) err
 		option.inputFormat = gobInputFormat
 	} else {
 		option.inputFormat = invalidInputFormat
-		return logger.NewErrorf("invalid tracee input format specified: %s", formatString)
+		return errfmt.Errorf("invalid tracee input format specified: %s", formatString)
 	}
 	return nil
 }

@@ -4,25 +4,28 @@ import (
 	"path"
 	"strings"
 
+	lru "github.com/hashicorp/golang-lru"
+	"golang.org/x/exp/maps"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events"
 	"github.com/aquasecurity/tracee/pkg/events/parse"
 	"github.com/aquasecurity/tracee/pkg/filters"
-	"github.com/aquasecurity/tracee/pkg/filterscope"
 	"github.com/aquasecurity/tracee/pkg/logger"
+	"github.com/aquasecurity/tracee/pkg/policy"
 	"github.com/aquasecurity/tracee/pkg/utils/sharedobjs"
 	"github.com/aquasecurity/tracee/types/trace"
-	"golang.org/x/exp/maps"
 )
 
 func SymbolsLoaded(
 	soLoader sharedobjs.DynamicSymbolsLoader,
-	filterScopes *filterscope.FilterScopes,
+	policies *policy.Policies,
 ) DeriveFunction {
 
 	symbolsLoadedFilters := map[string]filters.Filter{}
 
-	for filterScope := range filterScopes.Map() {
-		f := filterScope.ArgFilter.GetEventFilters(events.SymbolsLoaded)
+	for p := range policies.Map() {
+		f := p.ArgFilter.GetEventFilters(events.SymbolsLoaded)
 		maps.Copy(symbolsLoadedFilters, f)
 	}
 
@@ -69,6 +72,7 @@ type symbolsLoadedEventGenerator struct {
 	pathPrefixWhitelist []string
 	librariesWhitelist  []string
 	returnedErrors      map[string]bool
+	libsCache           *lru.Cache
 }
 
 func initSymbolsLoadedEventGenerator(
@@ -83,13 +87,15 @@ func initSymbolsLoadedEventGenerator(
 	}
 
 	var libraries, prefixes []string
-	for _, path := range whitelistedLibsPrefixes {
-		if strings.HasPrefix(path, "/") {
-			prefixes = append(prefixes, path)
+	for _, wlPath := range whitelistedLibsPrefixes {
+		if strings.HasPrefix(wlPath, "/") {
+			prefixes = append(prefixes, wlPath)
 		} else {
-			libraries = append(libraries, path)
+			libraries = append(libraries, wlPath)
 		}
 	}
+
+	cacheLRU, _ := lru.New(10240)
 
 	return &symbolsLoadedEventGenerator{
 		soLoader:            soLoader,
@@ -97,6 +103,7 @@ func initSymbolsLoadedEventGenerator(
 		pathPrefixWhitelist: prefixes,
 		librariesWhitelist:  libraries,
 		returnedErrors:      make(map[string]bool),
+		libsCache:           cacheLRU,
 	}
 }
 
@@ -106,11 +113,20 @@ func (symbsLoadedGen *symbolsLoadedEventGenerator) deriveArgs(
 
 	loadingObjectInfo, err := getSharedObjectInfo(event)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 
 	if symbsLoadedGen.isWhitelist(loadingObjectInfo.Path) {
 		return nil, nil
+	}
+
+	matchedSyms, ok := symbsLoadedGen.getSymbolsFromCache(loadingObjectInfo.Id)
+	if ok {
+		if len(matchedSyms) > 0 {
+			return []interface{}{loadingObjectInfo.Path, matchedSyms}, nil
+		} else {
+			return nil, nil
+		}
 	}
 
 	soSyms, err := symbsLoadedGen.soLoader.GetExportedSymbols(loadingObjectInfo)
@@ -121,9 +137,9 @@ func (symbsLoadedGen *symbolsLoadedEventGenerator) deriveArgs(
 		_, ok := symbsLoadedGen.returnedErrors[err.Error()]
 		if !ok {
 			symbsLoadedGen.returnedErrors[err.Error()] = true
-			logger.Warn("symbols_loaded", "object loaded", loadingObjectInfo, "error", err.Error())
+			logger.Warnw("symbols_loaded", "object loaded", loadingObjectInfo, "error", err.Error())
 		} else {
-			logger.Debug("symbols_loaded", "object loaded", loadingObjectInfo, "error", err.Error())
+			logger.Debugw("symbols_loaded", "object loaded", loadingObjectInfo, "error", err.Error())
 		}
 		return nil, nil
 	}
@@ -136,6 +152,7 @@ func (symbsLoadedGen *symbolsLoadedEventGenerator) deriveArgs(
 		}
 	}
 
+	symbsLoadedGen.libsCache.Add(loadingObjectInfo.Id, exportedWatchSymbols)
 	if len(exportedWatchSymbols) > 0 {
 		return []interface{}{loadingObjectInfo.Path, exportedWatchSymbols}, nil
 	}
@@ -176,25 +193,40 @@ func (symbsLoadedGen *symbolsLoadedEventGenerator) isWhitelist(soPath string) bo
 	return false
 }
 
+// getSymbolsFromCache query the cache for check results of specified object.
+// Return the watched symbols found in the object, and if it was found in the cache.
+func (symbsLoadedGen *symbolsLoadedEventGenerator) getSymbolsFromCache(id sharedobjs.ObjID) ([]string, bool) {
+	cachedSyms, ok := symbsLoadedGen.libsCache.Get(id)
+	if !ok {
+		return nil, false
+	}
+	cachedSymsList, ok := cachedSyms.([]string)
+	if !ok {
+		logger.Errorw("Unexpected cached type")
+		return nil, false
+	}
+	return cachedSymsList, true
+}
+
 // getSharedObjectInfo extract from SO loading event the information available about the SO
 func getSharedObjectInfo(event trace.Event) (sharedobjs.ObjInfo, error) {
 	var objInfo sharedobjs.ObjInfo
 
 	loadedObjectInode, err := parse.ArgVal[uint64](&event, "inode")
 	if err != nil {
-		return objInfo, logger.ErrorFunc(err)
+		return objInfo, errfmt.WrapError(err)
 	}
 	loadedObjectDevice, err := parse.ArgVal[uint32](&event, "dev")
 	if err != nil {
-		return objInfo, logger.ErrorFunc(err)
+		return objInfo, errfmt.WrapError(err)
 	}
 	loadedObjectCtime, err := parse.ArgVal[uint64](&event, "ctime")
 	if err != nil {
-		return objInfo, logger.ErrorFunc(err)
+		return objInfo, errfmt.WrapError(err)
 	}
 	loadedObjectPath, err := parse.ArgVal[string](&event, "pathname")
 	if err != nil {
-		return objInfo, logger.ErrorFunc(err)
+		return objInfo, errfmt.WrapError(err)
 	}
 
 	objInfo = sharedobjs.ObjInfo{

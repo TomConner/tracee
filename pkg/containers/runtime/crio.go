@@ -4,10 +4,11 @@ import (
 	"context"
 	"strings"
 
-	"github.com/aquasecurity/tracee/pkg/logger"
 	cri "github.com/kubernetes/cri-api/pkg/apis/runtime/v1alpha2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 )
 
 type crioEnricher struct {
@@ -18,7 +19,7 @@ func CrioEnricher(socket string) (ContainerEnricher, error) {
 	unixSocket := "unix://" + strings.TrimPrefix(socket, "unix://")
 	conn, err := grpc.Dial(unixSocket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 	client := cri.NewRuntimeServiceClient(conn)
 
@@ -38,7 +39,7 @@ func (e *crioEnricher) Get(containerId string, ctx context.Context) (ContainerMe
 		Verbose:     true,
 	})
 	if err != nil {
-		return metadata, logger.ErrorFunc(err)
+		return metadata, errfmt.WrapError(err)
 	}
 
 	//if in k8s we can extract pod info from labels
@@ -56,6 +57,7 @@ func (e *crioEnricher) Get(containerId string, ctx context.Context) (ContainerMe
 	}
 	metadata.Name = resp.Status.Metadata.Name
 	metadata.Image = resp.Status.Image.Image
+	metadata.ImageDigest = resp.Status.ImageRef
 
 	return metadata, nil
 }

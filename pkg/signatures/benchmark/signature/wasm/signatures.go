@@ -1,18 +1,18 @@
 package wasm
 
 import (
-	_ "embed"
-
 	"context"
+	_ "embed"
 	"fmt"
 	"regexp"
 	"strings"
 
+	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/rego"
+
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/protocol"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/open-policy-agent/opa/ast"
-	"github.com/open-policy-agent/opa/rego"
 )
 
 var (
@@ -96,8 +96,8 @@ func NewSignature(metadata detect.SignatureMetadata, selector []detect.Signature
 	}, nil
 }
 
-func (s *signature) Init(cb detect.SignatureHandler) error {
-	s.cb = cb
+func (s *signature) Init(ctx detect.SignatureContext) error {
+	s.cb = ctx.Callback
 	return nil
 }
 

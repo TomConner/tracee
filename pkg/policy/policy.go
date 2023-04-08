@@ -1,4 +1,4 @@
-package filterscope
+package policy
 
 import (
 	"github.com/aquasecurity/tracee/pkg/events"
@@ -19,8 +19,9 @@ const (
 	ProcInfoMap          = "proc_info_map"
 )
 
-type FilterScope struct {
+type Policy struct {
 	ID                int
+	Name              string
 	EventsToTrace     map[events.ID]string
 	UIDFilter         *filters.BPFUIntFilter[uint32]
 	PIDFilter         *filters.BPFUIntFilter[uint32]
@@ -40,9 +41,10 @@ type FilterScope struct {
 	Follow            bool
 }
 
-func NewFilterScope() *FilterScope {
-	return &FilterScope{
+func NewPolicy() *Policy {
+	return &Policy{
 		ID:                0,
+		Name:              "",
 		EventsToTrace:     map[events.ID]string{},
 		UIDFilter:         filters.NewBPFUInt32Filter(UIDFilterMap),
 		PIDFilter:         filters.NewBPFUInt32Filter(PIDFilterMap),
@@ -63,8 +65,8 @@ func NewFilterScope() *FilterScope {
 	}
 }
 
-const MaxFilterScopes = 64
+const MaxPolicies = 64
 
 func isIDInRange(id int) bool {
-	return id >= 0 && id < MaxFilterScopes
+	return id >= 0 && id < MaxPolicies
 }

@@ -8,8 +8,10 @@ import (
 	"strings"
 
 	"github.com/aquasecurity/libbpfgo/helpers"
+
 	embed "github.com/aquasecurity/tracee"
 	tracee "github.com/aquasecurity/tracee/pkg/ebpf"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 )
 
@@ -28,15 +30,15 @@ func BpfObject(config *tracee.Config, kConfig *helpers.KernelConfig, OSInfo *hel
 	if bpfFilePath != "" {
 		d.bpfenv = true
 	} else if bpfFilePath == "" && err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
 	btfFilePath, err := checkEnvPath("TRACEE_BTF_FILE")
 	if btfFilePath != "" {
 		d.btfenv = true
 	} else if btfFilePath == "" && err != nil {
-		return logger.ErrorFunc(err)
+		return errfmt.WrapError(err)
 	}
-	logger.Debug("BTF", "bpfenv", d.bpfenv, "btfenv", d.btfenv, "vmlinux", d.btfvmlinux)
+	logger.Debugw("BTF", "bpfenv", d.bpfenv, "btfenv", d.btfenv, "vmlinux", d.btfvmlinux)
 
 	var tVersion, kVersion string
 	var bpfBytes []byte
@@ -48,15 +50,15 @@ func BpfObject(config *tracee.Config, kConfig *helpers.KernelConfig, OSInfo *hel
 	// (2) BPF file given & if no BTF exists: it is a non CO-RE BPF
 
 	if d.bpfenv {
-		logger.Debug("BPF: using BPF object from environment", "file", bpfFilePath)
+		logger.Debugw("BPF: using BPF object from environment", "file", bpfFilePath)
 		if d.btfvmlinux || d.btfenv { // (1)
 			if d.btfenv {
-				logger.Debug("BTF: using BTF file from environment", "file", btfFilePath)
+				logger.Debugw("BTF: using BTF file from environment", "file", btfFilePath)
 				config.BTFObjPath = btfFilePath
 			}
 		} // else {} (2)
 		if bpfBytes, err = os.ReadFile(bpfFilePath); err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 
 		goto out
@@ -65,15 +67,15 @@ func BpfObject(config *tracee.Config, kConfig *helpers.KernelConfig, OSInfo *hel
 	// (3) no BPF file given & BTF (vmlinux or env) exists: load embedded BPF as CO-RE
 
 	if d.btfvmlinux || d.btfenv { // (3)
-		logger.Debug("BPF: using embedded BPF object")
+		logger.Debugw("BPF: using embedded BPF object")
 		if d.btfenv {
-			logger.Debug("BTF: using BTF file from environment", "file", btfFilePath)
+			logger.Debugw("BTF: using BTF file from environment", "file", btfFilePath)
 			config.BTFObjPath = btfFilePath
 		}
 		bpfFilePath = "embedded-core"
 		bpfBytes, err = unpackCOREBinary()
 		if err != nil {
-			return logger.NewErrorf("could not unpack embedded CO-RE eBPF object: %v", err)
+			return errfmt.Errorf("could not unpack embedded CO-RE eBPF object: %v", err)
 		}
 
 		goto out
@@ -85,12 +87,12 @@ func BpfObject(config *tracee.Config, kConfig *helpers.KernelConfig, OSInfo *hel
 	err = unpackBTFHub(unpackBTFFile, OSInfo)
 
 	if err == nil {
-		logger.Debug("BTF: using BTF file from embedded btfhub", "file", unpackBTFFile)
+		logger.Debugw("BTF: using BTF file from embedded btfhub", "file", unpackBTFFile)
 		config.BTFObjPath = unpackBTFFile
 		bpfFilePath = "embedded-core"
 		bpfBytes, err = unpackCOREBinary()
 		if err != nil {
-			return logger.NewErrorf("could not unpack embedded CO-RE eBPF object: %v", err)
+			return errfmt.Errorf("could not unpack embedded CO-RE eBPF object: %v", err)
 		}
 
 		goto out
@@ -104,13 +106,13 @@ func BpfObject(config *tracee.Config, kConfig *helpers.KernelConfig, OSInfo *hel
 	kVersion = strings.ReplaceAll(kVersion, ".", "_")
 
 	bpfFilePath = fmt.Sprintf("%s/tracee.bpf.%s.%s.o", installPath, kVersion, tVersion)
-	logger.Debug("BPF: no BTF file was found or provided")
-	logger.Debug("BPF: trying non CO-RE eBPF", "file", bpfFilePath)
+	logger.Debugw("BPF: no BTF file was found or provided")
+	logger.Debugw("BPF: trying non CO-RE eBPF", "file", bpfFilePath)
 	if bpfBytes, err = os.ReadFile(bpfFilePath); err != nil {
 		// tell entrypoint that eBPF non CO-RE obj compilation is needed
-		logger.Error("BPF", "error", err)
-		logger.Error("BPF: could not load CO-RE eBPF object and could not find non CO-RE object", "installPath", installPath)
-		logger.Warn("BPF: you may build a non CO-RE eBPF object by executing \"make install-bpf-nocore\" in the source tree")
+		logger.Errorw("BPF", "error", err)
+		logger.Errorw("BPF: could not load CO-RE eBPF object and could not find non CO-RE object", "installPath", installPath)
+		logger.Warnw("BPF: you may build a non CO-RE eBPF object by executing \"make install-bpf-nocore\" in the source tree")
 		os.Exit(2)
 	}
 
@@ -127,7 +129,7 @@ func checkEnvPath(env string) (string, error) {
 	if filePath != "" {
 		_, err := os.Stat(filePath)
 		if err != nil {
-			return "", logger.NewErrorf("could not open %s %s", env, filePath)
+			return "", errfmt.Errorf("could not open %s %s", env, filePath)
 		}
 		return filePath, nil
 	}
@@ -140,7 +142,7 @@ func unpackCOREBinary() ([]byte, error) {
 		return nil, err
 	}
 
-	logger.Debug("unpacked CO:RE bpf object file into memory")
+	logger.Debugw("Unpacked CO:RE bpf object file into memory")
 
 	return b, nil
 }
@@ -155,25 +157,32 @@ func unpackBTFHub(outFilePath string, OSInfo *helpers.OSInfo) error {
 	arch := OSInfo.GetOSReleaseFieldValue(helpers.OS_ARCH)
 
 	if err := os.MkdirAll(filepath.Dir(outFilePath), 0755); err != nil {
-		return logger.NewErrorf("could not create temp dir: %s", err.Error())
+		return errfmt.Errorf("could not create temp dir: %s", err.Error())
 	}
 
 	btfFilePath = fmt.Sprintf("dist/btfhub/%s/%s/%s/%s.btf", osId, versionId, arch, kernelRelease)
 	btfFile, err := embed.BPFBundleInjected.Open(btfFilePath)
 	if err != nil {
-		return logger.NewErrorf("error opening embedded btfhub file: %s", err.Error())
+		return errfmt.Errorf("error opening embedded btfhub file: %s", err.Error())
 	}
-	defer btfFile.Close()
+	defer func() {
+		if err := btfFile.Close(); err != nil {
+			logger.Errorw("Closing file", "error", err)
+		}
+	}()
 
 	outFile, err := os.Create(outFilePath)
 	if err != nil {
-		return logger.NewErrorf("could not create btf file: %s", err.Error())
+		return errfmt.Errorf("could not create btf file: %s", err.Error())
 	}
-	defer outFile.Close()
+	defer func() {
+		if err := outFile.Close(); err != nil {
+			logger.Errorw("Closing file", "error", err)
+		}
+	}()
 
 	if _, err := io.Copy(outFile, btfFile); err != nil {
-		return logger.NewErrorf("error copying embedded btfhub file: %s", err.Error())
-
+		return errfmt.Errorf("error copying embedded btfhub file: %s", err.Error())
 	}
 
 	return nil

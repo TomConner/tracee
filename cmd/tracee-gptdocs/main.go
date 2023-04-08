@@ -8,8 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/aquasecurity/tracee/pkg/cmd/urfave"
 	"github.com/urfave/cli/v2"
+
+	"github.com/aquasecurity/tracee/pkg/cmd/urfave"
 )
 
 const (
@@ -85,7 +86,9 @@ func main() {
 
 func printAndExitIfHelp(c *cli.Context, exit bool) {
 	if c.Bool("help") {
-		cli.ShowAppHelp(c)
+		if err := cli.ShowAppHelp(c); err != nil {
+			log.Fatal(err)
+		}
 		if exit {
 			os.Exit(0)
 		}

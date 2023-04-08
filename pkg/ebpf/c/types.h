@@ -33,7 +33,7 @@ typedef struct event_context {
     task_context_t task;
     u32 eventid;
     s32 syscall; // The syscall which triggered the event
-    u64 matched_scopes;
+    u64 matched_policies;
     s64 retval;
     u32 stack_id;
     u16 processor_id; // The ID of the processor which processed the event
@@ -119,6 +119,10 @@ enum event_id_e
     VFS_UTIMES,
     DO_TRUNCATE,
     FILE_MODIFICATION,
+    INOTIFY_WATCH,
+    SECURITY_BPF_PROG,
+    PROCESS_EXECUTION_FAILED,
+    HIDDEN_KERNEL_MODULE_SEEKER,
     MAX_EVENT_ID,
 };
 
@@ -149,6 +153,11 @@ enum argument_type_e
     U8_T,
     TIMESPEC_T,
     TYPE_MAX = 255UL
+};
+
+enum internal_hook_e
+{
+    EXEC_BINPRM = 80000,
 };
 
 enum mem_prot_alert_e
@@ -311,6 +320,11 @@ typedef struct config_entry {
     u64 pid_min;
 } config_entry_t;
 
+typedef struct event_config {
+    u64 submit_for_policies;
+    u64 param_types;
+} event_config_t;
+
 enum capture_options_e
 {
     NET_CAP_OPT_FILTERED = (1 << 0), // pcap should obey event filters
@@ -326,6 +340,7 @@ typedef struct event_data {
     char args[ARGS_BUF_SIZE];
     u32 buf_off;
     struct task_struct *task;
+    u64 param_types;
 } event_data_t;
 
 #define MAX_EVENT_SIZE sizeof(event_context_t) + ARGS_BUF_SIZE
@@ -442,6 +457,15 @@ typedef struct net_ctx_ext {
     __be16 local_port;
 } net_ctx_ext_t;
 
+typedef struct kernel_mod {
+    bool seen_proc_modules;
+    bool seen_modules_list;
+} kernel_module_t;
+
+typedef struct rb_node_stack {
+    struct rb_node *node;
+} rb_node_t;
+
 // version is not size limited - save only first 32 bytes.
 // srcversion is not size limited - modpost calculates srcversion with size: 25.
 #define MODULE_VERSION_MAX_LENGTH    32
@@ -455,17 +479,18 @@ typedef struct kmod_data {
     u64 next;
 } kmod_data_t;
 
-enum bpf_helper_usage_e
-{
-    HELPER_USAGE_FALSE,
-    HELPER_USAGE_TRUE,
-    HELPER_USAGE_UNKNOWN
-};
-
-typedef struct bpf_attach {
-    enum bpf_helper_usage_e write_user;
-    enum bpf_helper_usage_e override_return;
-} bpf_attach_t;
+// this struct is used to encode which helpers are used in bpf program.
+// it is an array of 4 u64 values - 256 bits.
+// there are currently 212 bpf helper functions
+// (https://elixir.bootlin.com/linux/v6.2.6/source/include/uapi/linux/bpf.h#L5488). the helpers IDs
+// start from 0 and continue in a sequence. the encoding is very simple - a bit is turned on if we
+// see the corresponding helper ID being used.
+#define MAX_NUM_OF_HELPERS   256
+#define SIZE_OF_HELPER_ELEM  64
+#define NUM_OF_HELPERS_ELEMS MAX_NUM_OF_HELPERS / SIZE_OF_HELPER_ELEM
+typedef struct bpf_used_helpers {
+    u64 helpers[NUM_OF_HELPERS_ELEMS];
+} bpf_used_helpers_t;
 
 typedef struct file_mod_key {
     u32 host_pid;

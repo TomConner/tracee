@@ -1,35 +1,95 @@
----
-# Release Tracee when a tag starting with v is pushed to the repository.
+#
+# When tag vXXX is pushed: Release Tracee
+#
 name: Release
-
 on:
-  workflow_dispatch: {}
   push:
     tags:
       - "v*"
-
 jobs:
   release:
-    name: Release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
+    name: Release X64 (Default)
+    env:
+      GH_TOKEN: ${{ github.token }}
+    runs-on:
+      [
+        "github-self-hosted_ami-0f66f3ab4856ffc3f_${{ github.event.number }}-${{ github.run_id }}",
+      ]
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           submodules: true
-      - name: Install Dependencies
-        uses: ./.github/actions/build-dependencies
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@main
+      - name: AWS Environment
+        run: |
+          dmidecode
+      - name: Login to docker.io registry
+        uses: docker/login-action@v2
         with:
-          cosign-release: 'v1.13.1'
-      - name: authenticate
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build
         run: |
-          gh auth login --with-token <<<'${{ secrets.GITHUB_TOKEN }}'
-          docker login docker.io --username ${{ secrets.DOCKERHUB_USER }} --password-stdin <<<'${{ secrets.DOCKERHUB_TOKEN }}'
-      - name: Build and Release
+          make -f builder/Makefile.release
+        # tracee:latest and tracee:full for historical reasons
+        # use :x86_64 as tag for the latest image
+        # use :x86_64-v0.xx.0 for versioned image
+      - name: Publish to docker.io registry
         run: |
-          make -f builder/Makefile.release PUSH_DOCKER_REPO=aquasec/tracee
+          TAG=$(git describe --tags --abbrev=0 | sed -e "s/v//gI")
+          ARCH=$(uname -m)
+          docker image tag tracee:latest aquasec/tracee:latest
+          docker image tag tracee:latest aquasec/tracee:${ARCH}
+          docker image tag tracee:latest aquasec/tracee:${TAG}
+          docker image tag tracee:latest aquasec/tracee:${ARCH}-${TAG}
+          docker image push aquasec/tracee:latest
+          docker image push aquasec/tracee:${ARCH}
+          docker image push aquasec/tracee:${ARCH}-${TAG}
+          docker image tag tracee:full aquasec/tracee:full
+          docker image tag tracee:full aquasec/tracee:${ARCH}-full
+          docker image tag tracee:full aquasec/tracee:${ARCH}-${TAG}-full
+          docker image push aquasec/tracee:full
+          docker image push aquasec/tracee:${ARCH}-full
+          docker image push aquasec/tracee:${ARCH}-${TAG}-full
+  release-arm64:
+    name: Release ARM64
+    env:
+      GH_TOKEN: ${{ github.token }}
+    # only runs after x64 released (x64 is still the "default" arch)
+    needs:
+      - release
+    runs-on:
+      [
+        "github-self-hosted_ami-0226a47b9804ee055_${{ github.event.number }}-${{ github.run_id }}",
+      ]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: AWS Environment
+        run: |
+          dmidecode
+      - name: Login to docker.io registry
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build
+        run: |
+          make -f builder/Makefile.release
+        # NO tracee:latest and tracee:full (historical reason: amd64 only)
+        # use :aarch64 as tag for the latest image
+        # use :aarch64-v0.xx.0 for versioned image
+      - name: Publish to docker.io registry
+        run: |
+          TAG=$(git describe --tags --abbrev=0 | sed -e "s/v//gI")
+          ARCH=$(uname -m)
+          docker image tag tracee:latest aquasec/tracee:${ARCH}
+          docker image tag tracee:latest aquasec/tracee:${ARCH}-${TAG}
+          docker image push aquasec/tracee:${ARCH}
+          docker image push aquasec/tracee:${ARCH}-${TAG}
+          docker image tag tracee:full aquasec/tracee:${ARCH}-full
+          docker image tag tracee:full aquasec/tracee:${ARCH}-${TAG}-full
+          docker image push aquasec/tracee:${ARCH}-full
+          docker image push aquasec/tracee:${ARCH}-${TAG}-full

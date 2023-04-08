@@ -3,9 +3,12 @@ package sharedobjs
 import (
 	"debug/elf"
 
-	"github.com/aquasecurity/tracee/pkg/capabilities"
-	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/hashicorp/golang-lru/simplelru"
+	"golang.org/x/exp/maps"
+
+	"github.com/aquasecurity/tracee/pkg/capabilities"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
+	"github.com/aquasecurity/tracee/pkg/logger"
 )
 
 // HostSymbolsLoader is responsible for efficient reading of shared object's symbols.
@@ -31,7 +34,7 @@ func InitHostSymbolsLoader(cacheSize int) *HostSymbolsLoader {
 func (soLoader *HostSymbolsLoader) GetDynamicSymbols(soInfo ObjInfo) (map[string]bool, error) {
 	syms, err := soLoader.loadSOSymbols(soInfo)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 	dynSyms := copyMap(syms.Imported)
 	for expSym := range syms.Exported {
@@ -42,22 +45,24 @@ func (soLoader *HostSymbolsLoader) GetDynamicSymbols(soInfo ObjInfo) (map[string
 
 // GetExportedSymbols try to get shared objects exported symbols from lru, and if fails read needed information
 // from ELF file.
+// The returned map is part of a cache, so if the user wants to modify it he should copy it and modify it there.
 func (soLoader *HostSymbolsLoader) GetExportedSymbols(soInfo ObjInfo) (map[string]bool, error) {
 	syms, err := soLoader.loadSOSymbols(soInfo)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
-	return copyMap(syms.Exported), nil
+	return syms.Exported, nil
 }
 
 // GetImportedSymbols try to get shared objects imported symbols from lru, and if fails read needed information
 // from ELF file.
+// The returned map is part of a cache, so if the user wants to modify it he should copy it and modify it there.
 func (soLoader *HostSymbolsLoader) GetImportedSymbols(soInfo ObjInfo) (map[string]bool, error) {
 	syms, err := soLoader.loadSOSymbols(soInfo)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
-	return copyMap(syms.Imported), nil
+	return syms.Imported, nil
 }
 
 func (soLoader *HostSymbolsLoader) loadSOSymbols(soInfo ObjInfo) (*dynamicSymbols, error) {
@@ -67,7 +72,7 @@ func (soLoader *HostSymbolsLoader) loadSOSymbols(soInfo ObjInfo) (*dynamicSymbol
 	}
 	syms, err := soLoader.loadingFunc(soInfo.Path)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 	soLoader.soCache.Add(soInfo, syms)
 	return syms, nil
@@ -109,13 +114,17 @@ func loadSharedObjectDynamicSymbols(path string) (*dynamicSymbols, error) {
 		return e
 	})
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
-	defer loadedObject.Close()
+	defer func() {
+		if err := loadedObject.Close(); err != nil {
+			logger.Errorw("Closing file", "error", err)
+		}
+	}()
 
 	dynamicSymbols, err := loadedObject.DynamicSymbols()
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 	return parseDynamicSymbols(dynamicSymbols), nil
 }
@@ -134,8 +143,6 @@ func parseDynamicSymbols(dynamicSymbols []elf.Symbol) *dynamicSymbols {
 
 func copyMap(source map[string]bool) map[string]bool {
 	copiedMap := make(map[string]bool, len(source))
-	for k, v := range source {
-		copiedMap[k] = v
-	}
+	maps.Copy(copiedMap, source)
 	return copiedMap
 }

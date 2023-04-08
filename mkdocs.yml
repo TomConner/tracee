@@ -497,11 +497,17 @@ nav:
           - Custom Events:
               - Go: docs/events/custom/golang.md
               - Rego: docs/events/custom/rego.md
+      - Policies:
+          - Overview: docs/policies/index.md
+          - Scopes: docs/policies/scopes.md
+          - Rules: docs/policies/rules.md
+          - Actions: docs/policies/actions.md
       - Filters:
           - Filtering: docs/filters/filtering.md
       - Outputs:
           - Output Formats: docs/outputs/output-formats.md
           - Output Options: docs/outputs/output-options.md
+          - Logging: docs/outputs/logging.md
       - Forensics:
           - Getting Started: docs/forensics/index.md
       - Integrations:

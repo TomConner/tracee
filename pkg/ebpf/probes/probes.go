@@ -2,6 +2,8 @@ package probes
 
 import (
 	bpf "github.com/aquasecurity/libbpfgo"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 )
 
@@ -90,6 +92,7 @@ func Init(module *bpf.Module, netEnabled bool) (Probes, error) {
 		Filldir64:                  &traceProbe{eventName: "filldir64", probeType: kprobe, programName: "trace_filldir64"},
 		TaskRename:                 &traceProbe{eventName: "task:task_rename", probeType: rawTracepoint, programName: "tracepoint__task__task_rename"},
 		PrintSyscallTable:          &uProbe{eventName: "print_syscall_table", binaryPath: binaryPath, symbolName: "github.com/aquasecurity/tracee/pkg/ebpf.(*Tracee).triggerSyscallsIntegrityCheckCall", programName: "uprobe_syscall_trigger"},
+		HiddenKernelModuleSeeker:   &uProbe{eventName: "hidden_kernel_module", binaryPath: binaryPath, symbolName: "github.com/aquasecurity/tracee/pkg/ebpf.(*Tracee).triggerKernelModuleSeeker", programName: "uprobe_lkm_seeker"},
 		PrintNetSeqOps:             &uProbe{eventName: "print_net_seq_ops", binaryPath: binaryPath, symbolName: "github.com/aquasecurity/tracee/pkg/ebpf.(*Tracee).triggerSeqOpsIntegrityCheckCall", programName: "uprobe_seq_ops_trigger"},
 		PrintMemDump:               &uProbe{eventName: "print_mem_dump", binaryPath: binaryPath, symbolName: "github.com/aquasecurity/tracee/pkg/ebpf.(*Tracee).triggerMemDumpCall", programName: "uprobe_mem_dump_trigger"},
 		SecurityInodeRename:        &traceProbe{eventName: "security_inode_rename", probeType: kprobe, programName: "trace_security_inode_rename"},
@@ -122,12 +125,21 @@ func Init(module *bpf.Module, netEnabled bool) (Probes, error) {
 		FileModifiedRet:            &traceProbe{eventName: "file_modified", probeType: kretprobe, programName: "trace_ret_file_modified"},
 		FdInstall:                  &traceProbe{eventName: "fd_install", probeType: kprobe, programName: "trace_fd_install"},
 		FilpClose:                  &traceProbe{eventName: "filp_close", probeType: kprobe, programName: "trace_filp_close"},
+		InotifyFindInode:           &traceProbe{eventName: "inotify_find_inode", probeType: kprobe, programName: "trace_inotify_find_inode"},
+		InotifyFindInodeRet:        &traceProbe{eventName: "inotify_find_inode", probeType: kretprobe, programName: "trace_ret_inotify_find_inode"},
+		BpfCheck:                   &traceProbe{eventName: "bpf_check", probeType: kprobe, programName: "trace_bpf_check"},
+		ExecBinprm:                 &traceProbe{eventName: "exec_binprm", probeType: kprobe, programName: "trace_exec_binprm"},
+		ExecBinprmRet:              &traceProbe{eventName: "exec_binprm", probeType: kretprobe, programName: "trace_ret_exec_binprm"},
 	}
 
 	if !netEnabled {
 		// disable network cgroup probes (avoid effective CAP_NET_ADMIN if not needed)
-		allProbes[CgroupSKBIngress].autoload(module, false)
-		allProbes[CgroupSKBEgress].autoload(module, false)
+		if err := allProbes[CgroupSKBIngress].autoload(module, false); err != nil {
+			logger.Errorw("CgroupSKBIngress probe autoload", "error", err)
+		}
+		if err := allProbes[CgroupSKBEgress].autoload(module, false); err != nil {
+			logger.Errorw("CgroupSKBEgress probe autoload", "error", err)
+		}
 	}
 
 	return &probes{
@@ -166,7 +178,7 @@ func (p *probes) GetProbeType(handle Handle) string {
 // Attach attaches given handle's program to its hook
 func (p *probes) Attach(handle Handle, args ...interface{}) error {
 	if _, ok := p.probes[handle]; !ok {
-		return logger.NewErrorf("probe handle (%d) does not exist", handle)
+		return errfmt.Errorf("probe handle (%d) does not exist", handle)
 	}
 
 	return p.probes[handle].attach(p.module, args...)
@@ -175,7 +187,7 @@ func (p *probes) Attach(handle Handle, args ...interface{}) error {
 // Detach detaches given handle's program from its hook
 func (p *probes) Detach(handle Handle, args ...interface{}) error {
 	if _, ok := p.probes[handle]; !ok {
-		return logger.NewErrorf("probe handle (%d) does not exist", handle)
+		return errfmt.Errorf("probe handle (%d) does not exist", handle)
 	}
 
 	return p.probes[handle].detach(args...)
@@ -186,7 +198,7 @@ func (p *probes) DetachAll() error {
 	for _, pr := range p.probes {
 		err := pr.detach()
 		if err != nil {
-			return logger.ErrorFunc(err)
+			return errfmt.WrapError(err)
 		}
 	}
 
@@ -315,4 +327,10 @@ const (
 	FileModifiedRet
 	FdInstall
 	FilpClose
+	InotifyFindInode
+	InotifyFindInodeRet
+	BpfCheck
+	ExecBinprm
+	ExecBinprmRet
+	HiddenKernelModuleSeeker
 )

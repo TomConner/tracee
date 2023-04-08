@@ -1,47 +1,7 @@
-################################################################################
-# INSTRUCTIONS
-################################################################################
 #
-# This Dockerfile is meant to build the official tracee containers.
+# Creates the official tracee containers.
 #
-# 1. BUILDING tracee container:
-#
-#   $ docker build -f builder/Dockerfile.alpine-tracee-container \
-#           --build-arg=BTFHUB=[0|1] \
-#           --build-arg=FLAVOR=[tracee-core|tracee-nocore] \
-#           -t alpine-tracee:latest \
-#           .
-#
-# 2. RUNNING tracee container:
-#
-#   2.1 tracee-core:
-#
-#   $ docker run --privileged --pid=host \
-#           -v /etc/os-release:/etc/os-release-host:ro \
-#           -e LIBBPFGO_OSRELEASE_FILE=/etc/os-release-host \
-#           -e TRACEE_EBPF_ONLY=0 \
-#           --rm -it alpine-tracee [arguments | --help]
-#
-#   2.2 tracee-nocore:
-#
-#   $ docker run --privileged --pid=host \
-#           -v /etc/os-release:/etc/os-release-host:ro \
-#           -e LIBBPFGO_OSRELEASE_FILE=/etc/os-release-host \
-#           -v /usr/src:/usr/src:ro \
-#           -v /lib/modules:/lib/modules:ro \
-#           -e TRACEE_EBPF_ONLY=0 \
-#           -e FORCE_CORE=0 \
-#           --rm -it alpine-tracee [arguments | --help]
-#
-#   Notes:
-#
-#   - TRACEE_EBPF_ONLY=1 will execute "tracee-ebpf" instead of "tracee".
-#   - FORCE_CORE=1 will force CORE obj loading in a tracee-nocore container.
-#
-################################################################################
 
-# FLAVOR(s):
-#
 # tracee-core      entrypoint: tracee-ebpf + tracee-rules + tracee
 # tracee-nocore    entrypoint: install-bpf-nocore + tracee-ebpf + tracee-rules + tracee
 
@@ -62,8 +22,12 @@ RUN apk --no-cache update && \
     apk --no-cache add coreutils && \
     apk --no-cache add sudo curl && \
     apk --no-cache add libelf zlib && \
-    apk --no-cache add libc6-compat && \
-    curl -L -o /usr/bin/opa https://github.com/open-policy-agent/opa/releases/download/v0.48.0/opa_linux_amd64_static && \
+    apk --no-cache add libc6-compat
+
+# install OPA
+
+RUN altarch=$(uname -m | sed 's:x86_64:amd64:g' | sed 's:aarch64:arm64:g') && \
+    curl -L -o /usr/bin/opa https://github.com/open-policy-agent/opa/releases/download/v0.48.0/opa_linux_${altarch}_static && \
     chmod 755 /usr/bin/opa
 
 #
@@ -85,7 +49,8 @@ RUN apk --no-cache update && \
     apk --no-cache add linux-headers && \
     apk --no-cache add elfutils-dev && \
     apk --no-cache add libelf-static && \
-    apk --no-cache add zlib-static
+    apk --no-cache add zlib-static && \
+    ln -s /usr/bin/llc14 /usr/bin/llc
 
 #
 # tracee-make
@@ -155,5 +120,3 @@ FROM $FLAVOR
 USER root
 ENV HOME /tracee
 WORKDIR /tracee
-
-# vi:syntax=dockerfile:expandtab:tabstop=4:shiftwidth=4:softtabstop=4

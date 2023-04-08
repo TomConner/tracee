@@ -2,6 +2,8 @@ package initialization
 
 import (
 	"github.com/aquasecurity/libbpfgo/helpers"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 )
 
@@ -21,13 +23,13 @@ func LoadKconfigValues(kc *helpers.KernelConfig) (map[helpers.KernelConfigOption
 	var err error
 	for key, keyString := range kconfigUsed {
 		if err = kc.AddCustomKernelConfig(key, keyString); err != nil {
-			return nil, logger.ErrorFunc(err)
+			return nil, errfmt.WrapError(err)
 		}
 	}
 
 	// re-load kconfig and get just added kconfig option values
 	if err = kc.LoadKernelConfig(); err != nil { // invalid kconfig file: assume values then
-		logger.Debug("KConfig: warning: assuming kconfig values, might have unexpected behavior")
+		logger.Debugw("KConfig: warning: assuming kconfig values, might have unexpected behavior")
 		for key := range kconfigUsed {
 			values[key] = helpers.UNDEFINED
 		}

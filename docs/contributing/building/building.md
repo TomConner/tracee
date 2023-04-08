@@ -5,7 +5,12 @@
     1. docker container as [building environment](./environment.md)  
     2. building tracee [container images](./containers.md)  
 
-1. Building **dependencies**
+1. Supported **Architectures**
+
+    1. x86_64 (amd64)
+    1. aarch64 (arm64)
+
+2. Building **dependencies**
 
     1. **clang** && **llvm** (12, 13 or 14)
     1. **golang** (1.19)
@@ -25,10 +30,13 @@
     >
     > Those are very good examples for you to replicate a working environment.
 
-2. **Clone** [tracee repository](https://github.com/aquasecurity/tracee/)
+3. **Clone** [tracee repository](https://github.com/aquasecurity/tracee/)
+
+    ```console
+    git clone git@github.com:aquasecurity/tracee
+    ```
 
     ```text
-    $ git clone git@github.com:aquasecurity/tracee
     Cloning into 'tracee'...
     remote: Enumerating objects: 13251, done.
     remote: Counting objects: 100% (555/555), done.
@@ -38,11 +46,13 @@
     Resolving deltas: 100% (8105/8105), done.
     ```
 
-3. All makefiles have a **help** target to give you needed instrutions
+4. All makefiles have a **help** target to give you needed instructions
+
+    ```console
+    make help
+    ```
 
     ```text
-    $ make help
-
     # environment
 
         $ make env                      # show makefile environment/variables
@@ -90,10 +100,13 @@
         $ DEBUG=1 make ...              # build binaries with debug symbols
     ```
 
-4. Build **all** targets at once (but bpf-nocore)
+5. Build **all** targets at once (but bpf-nocore)
+
+    ```console
+    make all
+    ```
 
     ```text
-    $ make all
     Submodule 'libbpf' (https://github.com/libbpf/libbpf.git) registered for path '3rdparty/libbpf'
     Cloning into '/home/rafaeldtinoco/tracee/3rdparty/libbpf'...
     mkdir -p dist/signatures
@@ -103,10 +116,13 @@
         signatures/golang/export.go signatures/golang/kubernetes_api_connection.go signatures/golang/stdio_over_socket.go
     ```
 
-5. Build a **static binary** by setting `STATIC=1`
+6. Build a **static binary** by setting `STATIC=1`
+
+    ```console
+    STATIC=1 make all
+    ```
 
     ```text
-    $ STATIC=1 make all
     CC="clang" \
         CFLAGS=""-fPIC"" \
         LD_FLAGS="" \
@@ -120,10 +136,13 @@
     ...
     ```
 
-6. Build a **static binary** with [BTFHUB Support](https://github.com/aquasecurity/btfhub)
+7. Build a **static binary** with [BTFHUB Support](https://github.com/aquasecurity/btfhub)
+
+    ```console
+    BTFHUB=1 STATIC=1 make all
+    ```
 
     ```text
-    $ BTFHUB=1 STATIC=1 make all
     Cloning into '/home/rafaeldtinoco/tracee/3rdparty/btfhub'...
     remote: Enumerating objects: 205, done.
     remote: Counting objects: 100% (16/16), done.
@@ -140,7 +159,7 @@
 
     !!! Note
         BTFHUB support will embed several very small files (BTF files) into your
-        final binary. Those files will allow **tracee-ebpf** binary to be executed
+        final binary. Those files will allow **tracee** binary to be executed
         in kernels that doesn't have embedded BTF information (the ones described
         at the BTFHUB repository)
 
@@ -152,17 +171,19 @@
         >plugin.Open("/tracee/dist/signatures/builtin.so"): Dynamic loading not supported
         >```
 
-7. Build a **debuggable binary** with DWARF generation by setting `DEBUG=1`
+8. Build a **debugable binary** with DWARF generation by setting `DEBUG=1`
 
+    ```console
+    DEBUG=1 make
+    ```
+    
     ```text
-    $ DEBUG=1 make
-    ...
     GOOS=linux CC=clang GOARCH=amd64 CGO_CFLAGS="-I/home/gg/code/tracee/dist/libbpf" CGO_LDFLAGS="-lelf  -lz  /home/gg/code/tracee/dist/libbpf/libbpf.a" go build \
         -tags core,ebpf \
         -ldflags=" \
              -extldflags \"\" \
              -X main.version=\"v0.8.0-107-g121efeb\" \
             " \
-        -v -o dist/tracee-ebpf \
-       ./cmd/tracee-ebpf
+        -v -o dist/tracee \
+       ./cmd/tracee
     ```

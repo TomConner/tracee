@@ -4,13 +4,15 @@ import (
 	"context"
 	"strings"
 
-	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/namespaces"
 	cri "github.com/kubernetes/cri-api/pkg/apis/runtime/v1alpha2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
+	"github.com/aquasecurity/tracee/pkg/logger"
 )
 
 type containerdEnricher struct {
@@ -25,13 +27,15 @@ func ContainerdEnricher(socket string) (ContainerEnricher, error) {
 
 	client, err := containerd.New(socket)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 
 	conn, err := grpc.Dial(unixSocket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		client.Close()
-		return nil, logger.ErrorFunc(err)
+		if errC := client.Close(); errC != nil {
+			logger.Errorw("Closing containerd connection", "error", errC)
+		}
+		return nil, errfmt.WrapError(err)
 	}
 
 	enricher.images = cri.NewImageServiceClient(conn)
@@ -47,7 +51,7 @@ func (e *containerdEnricher) Get(containerId string, ctx context.Context) (Conta
 	}
 	nsList, err := e.namespaces.List(ctx)
 	if err != nil {
-		return metadata, logger.NewErrorf("failed to fetch namespaces %s", err.Error())
+		return metadata, errfmt.Errorf("failed to fetch namespaces %s", err.Error())
 	}
 	for _, namespace := range nsList {
 		nsCtx := namespaces.WithNamespace(ctx, namespace)
@@ -57,6 +61,7 @@ func (e *containerdEnricher) Get(containerId string, ctx context.Context) (Conta
 			continue
 		} else {
 			imageName := container.Image
+			imageDigest := container.Image
 			image := container.Image
 			//container may not have image name as id, if so fetch from the sha256 id
 			if strings.HasPrefix(image, "sha256:") {
@@ -67,9 +72,13 @@ func (e *containerdEnricher) Get(containerId string, ctx context.Context) (Conta
 				})
 				if err != nil {
 					imageName = image
+					imageDigest = image
 				} else {
 					if len(imageInfo.Image.RepoTags) > 0 {
 						imageName = imageInfo.Image.RepoTags[0]
+					}
+					if len(imageInfo.Image.RepoDigests) > 0 {
+						imageDigest = imageInfo.Image.RepoTags[0]
 					}
 				}
 			}
@@ -89,12 +98,13 @@ func (e *containerdEnricher) Get(containerId string, ctx context.Context) (Conta
 				metadata.Name = labels[ContainerNameLabel]
 			}
 			metadata.Image = imageName
+			metadata.ImageDigest = imageDigest
 
 			return metadata, nil
 		}
 	}
 
-	return metadata, logger.NewErrorf("failed to find container in any namespace")
+	return metadata, errfmt.Errorf("failed to find container in any namespace")
 }
 
 func (e *containerdEnricher) isSandbox(labels map[string]string) bool {

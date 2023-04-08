@@ -5,10 +5,11 @@ import (
 	"strconv"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/protocol"
 	"github.com/aquasecurity/tracee/types/trace"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Wrap the specified protocol.Event as Event so we can use cel-go without implementing custom ref.TypeProvider.
@@ -36,12 +37,8 @@ func Wrap(envelope protocol.Event) (*Event, error) {
 		PIDNS:               int64(event.PIDNS),
 		ProcessName:         event.ProcessName,
 		HostName:            event.HostName,
-		ContainerID:         event.ContainerID,
-		ContainerImage:      event.ContainerImage,
-		ContainerName:       event.ContainerName,
-		PodName:             event.PodName,
-		PodNamespace:        event.PodNamespace,
-		PodUID:              event.PodUID,
+		Container:           wrapContainerData(&event.Container),
+		Kubernetes:          wrapKubernetesData(&event.Kubernetes),
 		EventID:             int64(event.EventID),
 		EventName:           event.EventName,
 		ArgsNum:             int64(event.ArgsNum),
@@ -91,7 +88,7 @@ var (
 func toArg(event trace.Event, source trace.Argument) (*Argument, error) {
 	valueType, ok := typesMapping[source.Type]
 	if !ok {
-		logger.Error("unrecognized event arg",
+		logger.Errorw("Unrecognized event arg",
 			"eventName", event.EventName,
 			"name", source.Name,
 			"type", source.Type,
@@ -135,7 +132,7 @@ func toArg(event trace.Event, source trace.Argument) (*Argument, error) {
 				Uint32Value: &v,
 			}
 		default:
-			logger.Error("unhandled unsigned integer type", "type", fmt.Sprintf("%T", source.Value))
+			logger.Errorw("Unhandled unsigned integer type", "type", fmt.Sprintf("%T", source.Value))
 		}
 	case ValueType_UINT64:
 		v := source.Value.(uint64)
@@ -213,4 +210,22 @@ func parsePort(value string) (uint32, error) {
 		return 0, err
 	}
 	return uint32(i), nil
+}
+
+func wrapContainerData(cont *trace.Container) *Container {
+	return &Container{
+		Id:            cont.ID,
+		ImageName:     cont.ImageName,
+		ImageDigest:   cont.ImageDigest,
+		ContainerName: cont.Name,
+	}
+}
+
+func wrapKubernetesData(kube *trace.Kubernetes) *Kubernetes {
+	return &Kubernetes{
+		PodName:      kube.PodName,
+		PodNamespace: kube.PodNamespace,
+		PodUID:       kube.PodUID,
+		PodSandbox:   kube.PodSandbox,
+	}
 }

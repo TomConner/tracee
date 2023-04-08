@@ -3,9 +3,10 @@ package flags
 import (
 	"testing"
 
-	"github.com/aquasecurity/tracee/pkg/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aquasecurity/tracee/pkg/events"
 )
 
 func TestFilter_prepareEventsToTrace(t *testing.T) {
@@ -91,7 +92,7 @@ func TestFilter_prepareEventsToTrace(t *testing.T) {
 		},
 	}
 	eventsNameToID := events.Definitions.NamesToIDs()
-	// remove internal events since they shouldn't be accesible by users
+	// remove internal events since they shouldn't be accessible by users
 	for event, id := range eventsNameToID {
 		if events.Definitions.Get(id).Internal {
 			delete(eventsNameToID, event)

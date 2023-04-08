@@ -3,11 +3,12 @@ package main
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/aquasecurity/tracee/signatures/signaturestest"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDockerAbuse(t *testing.T) {
@@ -20,8 +21,8 @@ func TestDockerAbuse(t *testing.T) {
 			Name: "should trigger detection - security_file_open",
 			Events: []trace.Event{
 				{
-					EventName:   "security_file_open",
-					ContainerID: "dockercontainer",
+					EventName: "security_file_open",
+					Container: trace.Container{ID: "dockercontainer"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -42,8 +43,8 @@ func TestDockerAbuse(t *testing.T) {
 				"TRC-1019": {
 					Data: nil,
 					Event: trace.Event{
-						EventName:   "security_file_open",
-						ContainerID: "dockercontainer",
+						EventName: "security_file_open",
+						Container: trace.Container{ID: "dockercontainer"},
 						Args: []trace.Argument{
 							{
 								ArgMeta: trace.ArgMeta{
@@ -81,8 +82,8 @@ func TestDockerAbuse(t *testing.T) {
 			Name: "should trigger detection - security_socket_connect",
 			Events: []trace.Event{
 				{
-					EventName:   "security_socket_connect",
-					ContainerID: "dockercontainer",
+					EventName: "security_socket_connect",
+					Container: trace.Container{ID: "dockercontainer"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -97,8 +98,8 @@ func TestDockerAbuse(t *testing.T) {
 				"TRC-1019": {
 					Data: nil,
 					Event: trace.Event{
-						EventName:   "security_socket_connect",
-						ContainerID: "dockercontainer",
+						EventName: "security_socket_connect",
+						Container: trace.Container{ID: "dockercontainer"},
 						Args: []trace.Argument{
 							{
 								ArgMeta: trace.ArgMeta{
@@ -130,8 +131,8 @@ func TestDockerAbuse(t *testing.T) {
 			Name: "should not trigger detection - security_file_open wrong path",
 			Events: []trace.Event{
 				{
-					EventName:   "security_file_open",
-					ContainerID: "dockercontainer",
+					EventName: "security_file_open",
+					Container: trace.Container{ID: "dockercontainer"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -154,8 +155,8 @@ func TestDockerAbuse(t *testing.T) {
 			Name: "should not trigger detection - security_file_open wrong open flags",
 			Events: []trace.Event{
 				{
-					EventName:   "security_file_open",
-					ContainerID: "dockercontainer",
+					EventName: "security_file_open",
+					Container: trace.Container{ID: "dockercontainer"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -178,8 +179,8 @@ func TestDockerAbuse(t *testing.T) {
 			Name: "should not trigger detection - security_socket_connect wrong addr",
 			Events: []trace.Event{
 				{
-					EventName:   "security_socket_connect",
-					ContainerID: "dockercontainer",
+					EventName: "security_socket_connect",
+					Container: trace.Container{ID: "dockercontainer"},
 					Args: []trace.Argument{
 						{
 							ArgMeta: trace.ArgMeta{
@@ -198,7 +199,7 @@ func TestDockerAbuse(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			holder := signaturestest.FindingsHolder{}
 			sig := DockerAbuse{}
-			sig.Init(holder.OnFinding)
+			sig.Init(detect.SignatureContext{Callback: holder.OnFinding})
 
 			for _, e := range tc.Events {
 				err := sig.OnEvent(e.ToProtocol())

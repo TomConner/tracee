@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/aquasecurity/tracee/pkg/events"
-	"github.com/aquasecurity/tracee/types/trace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/aquasecurity/tracee/pkg/events"
+	"github.com/aquasecurity/tracee/types/trace"
 )
 
 func Test_DeriveEvent(t *testing.T) {
@@ -195,7 +196,7 @@ func TestDeriveMultipleEvents(t *testing.T) {
 		DerivedEventsAmount int
 	}{
 		{
-			Name:           "Hapfapy flow - derive 1 event",
+			Name:           "Happy flow - derive 1 event",
 			ExpectedErrors: nil,
 			ArgsDeriveFunc: func(event trace.Event) ([][]interface{}, []error) {
 				return [][]interface{}{{1, 2}}, nil
@@ -203,7 +204,7 @@ func TestDeriveMultipleEvents(t *testing.T) {
 			DerivedEventsAmount: 1,
 		},
 		{
-			Name:           "Hapfapy flow - derive 2 event",
+			Name:           "Happy flow - derive 2 event",
 			ExpectedErrors: nil,
 			ArgsDeriveFunc: func(event trace.Event) ([][]interface{}, []error) {
 				return [][]interface{}{{1, 2}, {3, 4}}, nil
@@ -356,17 +357,23 @@ func getTestEvent() trace.Event {
 		PIDNS:               23456,
 		ProcessName:         "test",
 		HostName:            "test",
-		ContainerID:         "test",
-		ContainerImage:      "test",
-		ContainerName:       "test",
-		PodName:             "test",
-		PodNamespace:        "test",
-		PodUID:              "test",
-		EventID:             123,
-		EventName:           "test_event",
-		ArgsNum:             1,
-		ReturnValue:         1,
-		StackAddresses:      []uint64{4444},
+		Container: trace.Container{
+			ID:          "test",
+			Name:        "test",
+			ImageName:   "test",
+			ImageDigest: "test",
+		},
+		Kubernetes: trace.Kubernetes{
+			PodName:      "test",
+			PodNamespace: "test",
+			PodUID:       "test",
+			PodSandbox:   false,
+		},
+		EventID:        123,
+		EventName:      "test_event",
+		ArgsNum:        1,
+		ReturnValue:    1,
+		StackAddresses: []uint64{4444},
 		Args: []trace.Argument{
 			{
 				ArgMeta: trace.ArgMeta{

@@ -1,11 +1,12 @@
 package derive
 
 import (
+	"github.com/google/gopacket/layers"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/events"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/trace"
-
-	"github.com/google/gopacket/layers"
 )
 
 //
@@ -23,7 +24,7 @@ func deriveDNS() deriveArgsFunction {
 func deriveDNSEvents(event trace.Event) ([]interface{}, error) {
 	net, dns, err := eventToProtoDNS(&event)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 	if dns == nil {
 		return nil, nil // connection related packets
@@ -56,13 +57,13 @@ func deriveDNSRequest() deriveArgsFunction {
 func deriveDNSRequestEvents(event trace.Event) ([]interface{}, error) {
 	net, dns, err := eventToProtoDNS(&event)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 	if dns == nil {
 		return nil, nil // connection related packets
 	}
 	if net == nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 
 	// discover if it is a request or response
@@ -80,7 +81,7 @@ func deriveDNSRequestEvents(event trace.Event) ([]interface{}, error) {
 	// NOTE: No DNS server does more than 1 question per query, but spec allows.
 
 	if len(requests) != 1 || len(requests) != int(dns.QDCount) {
-		logger.Debug("wrong number of requests found")
+		logger.Debugw("Wrong number of requests found")
 		return nil, nil
 	}
 
@@ -105,13 +106,13 @@ func deriveDNSResponse() deriveArgsFunction {
 func deriveDNSResponseEvents(event trace.Event) ([]interface{}, error) {
 	net, dns, err := eventToProtoDNS(&event)
 	if err != nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 	if dns == nil {
 		return nil, nil // connection related packets
 	}
 	if net == nil {
-		return nil, logger.ErrorFunc(err)
+		return nil, errfmt.WrapError(err)
 	}
 
 	// discover if it is a request or response
@@ -134,13 +135,13 @@ func deriveDNSResponseEvents(event trace.Event) ([]interface{}, error) {
 
 	requests = convertProtoDNSQuestionToDnsRequest(dns.Questions)
 	if len(requests) != 1 {
-		logger.Debug("wrong number of requests found")
+		logger.Debugw("Wrong number of requests found")
 		return nil, nil
 	}
 
 	responses = convertProtoDNSResourceRecordToDnsResponse(requests[0], dns.Answers)
 	if len(responses[0].DnsAnswer) != int(dns.ANCount) { // number of responses to expect
-		logger.Debug("could not get all DNS responses")
+		logger.Debugw("Could not get all DNS responses")
 		return nil, nil
 	}
 
@@ -157,7 +158,7 @@ func eventToProtoDNS(event *trace.Event) (*netPair, *trace.ProtoDNS, error) {
 
 	layer7, err := parseUntilLayer7(event, &DnsNetPair)
 	if err != nil {
-		return nil, nil, logger.ErrorFunc(err)
+		return nil, nil, errfmt.WrapError(err)
 	}
 
 	switch l7 := layer7.(type) {

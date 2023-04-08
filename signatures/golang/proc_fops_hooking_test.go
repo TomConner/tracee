@@ -3,11 +3,12 @@ package main
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/aquasecurity/tracee/signatures/signaturestest"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestProcFopsHooking(t *testing.T) {
@@ -95,7 +96,7 @@ func TestProcFopsHooking(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			holder := signaturestest.FindingsHolder{}
 			sig := ProcFopsHooking{}
-			sig.Init(holder.OnFinding)
+			sig.Init(detect.SignatureContext{Callback: holder.OnFinding})
 
 			for _, e := range tc.Events {
 				err := sig.OnEvent(e.ToProtocol())

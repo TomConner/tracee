@@ -10,10 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aquasecurity/tracee/pkg/events"
-	"github.com/aquasecurity/tracee/pkg/logger"
 	gogpt "github.com/sashabaranov/go-gpt3"
 	"gopkg.in/yaml.v2"
+
+	"github.com/aquasecurity/tracee/pkg/events"
+	"github.com/aquasecurity/tracee/pkg/logger"
 )
 
 const (
@@ -115,7 +116,7 @@ func (r GPTDocsRunner) Run(ctx context.Context) error {
 	for _, given := range r.GivenEvents {
 		_, ok := events.Definitions.GetID(given)
 		if !ok {
-			logger.Error("event definition not found", "event", given)
+			logger.Errorw("Event definition not found", "event", given)
 		}
 	}
 
@@ -135,7 +136,7 @@ func (r GPTDocsRunner) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return nil
 			default:
-				logger.Debug("file already exists", "file", fileName)
+				logger.Debugw("File already exists", "file", fileName)
 				continue
 			}
 		}
@@ -150,12 +151,12 @@ func (r GPTDocsRunner) Run(ctx context.Context) error {
 				}
 			}
 			if !found {
-				logger.Debug("event not in given list", "event", evt.Name)
+				logger.Debugw("Event not in given list", "event", evt.Name)
 				continue
 			}
 		}
 
-		logger.Debug("picked event", "event", evt.Name)
+		logger.Debugw("Picked event", "event", evt.Name)
 
 		// Submit event to be processed
 
@@ -179,7 +180,7 @@ func (r GPTDocsRunner) GenerateSyscall(
 
 	once.Do(func() {
 		if os.MkdirAll(outputDirectory, 0755) != nil {
-			logger.Error("error creating output directory")
+			logger.Errorw("Error creating output directory")
 		}
 	})
 
@@ -196,7 +197,7 @@ func (r GPTDocsRunner) GenerateSyscall(
 
 	y, err = yaml.Marshal(evt.Params)
 	if err != nil {
-		logger.Error("error marshaling event", "err", err)
+		logger.Errorw("Error marshaling event", "err", err)
 	}
 
 	headNote := `
@@ -205,7 +206,7 @@ that will describe an event from a tracing software. This event comes from a
 syscall being executed and has the same name, or similar, as the syscall name.
 The event arguments are related to the syscall arguments. All the contents of
 the markdown file should come from the linux manual page of the given syscall or
-given information. The hooked function item is the kernel entry pooint for the
+given information. The hooked function item is the kernel entry point for the
 given syscall. The template for this markdown file is the following:
 `
 	templateYaml := fmt.Sprintf("```yaml\n%s\n```", template[:])
@@ -266,7 +267,11 @@ given syscall. The template for this markdown file is the following:
 	if err != nil {
 		return "", fmt.Errorf("error opening output file: %v", err)
 	}
-	defer outputFile.Close()
+	defer func() {
+		if err := outputFile.Close(); err != nil {
+			logger.Errorw("Closing file", "error", err)
+		}
+	}()
 
 	_, err = fmt.Fprintf(outputFile, "%v\n%v", choicesStr, footNote)
 

@@ -29,6 +29,10 @@ func (t *Tracee) engineEvents(ctx context.Context, in <-chan *trace.Event) (<-ch
 		for {
 			select {
 			case event := <-in:
+				if event == nil {
+					continue // might happen during initialization (ctrl+c seg faults)
+				}
+
 				id := events.ID(event.EventID)
 
 				// if the event is marked as submit, we pass it to the engine
@@ -39,12 +43,16 @@ func (t *Tracee) engineEvents(ctx context.Context, in <-chan *trace.Event) (<-ch
 						continue
 					}
 
+					// Get a copy of our event before sending it down the pipeline.
+					// This is needed because a later modification of the event (in
+					// particular of the matched policies) can affect engine stage.
+					eventCopy := *event
 					// pass the event to the sink stage, if the event is also marked as emit
 					// it will be sent to print by the sink stage
 					out <- event
 
 					// send the event to the rule event
-					engineInput <- event.ToProtocol()
+					engineInput <- eventCopy.ToProtocol()
 				}
 			case <-ctx.Done():
 				return
@@ -63,7 +71,7 @@ func (t *Tracee) engineEvents(ctx context.Context, in <-chan *trace.Event) (<-ch
 				}
 
 				if !t.shouldProcessEvent(event) {
-					t.stats.EventsFiltered.Increment()
+					_ = t.stats.EventsFiltered.Increment()
 					continue
 				}
 

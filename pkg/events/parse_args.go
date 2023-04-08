@@ -8,7 +8,8 @@ import (
 
 	bpf "github.com/aquasecurity/libbpfgo"
 	"github.com/aquasecurity/libbpfgo/helpers"
-	"github.com/aquasecurity/tracee/pkg/logger"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/types/trace"
 )
 
@@ -239,22 +240,14 @@ func ParseArgs(event *trace.Event) error {
 				ParseOrEmptyString(progTypeArg, progTypeArgument, err)
 			}
 		}
-		if writeUserArg := GetArg(event, "prog_write_user"); writeUserArg != nil {
-			if writeUser, isInt := writeUserArg.Value.(int32); isInt {
-				perfTypestr, err := parseBpfAttachHelperUsage(writeUser)
-				EmptyString(writeUserArg)
-				if err == nil {
-					writeUserArg.Value = perfTypestr
+		if helpersArg := GetArg(event, "prog_helpers"); helpersArg != nil {
+			if helpersList, isUintSlice := helpersArg.Value.([]uint64); isUintSlice {
+				parsedHelpersList, err := parseBpfHelpersUsage(helpersList)
+				if err != nil {
+					return err
 				}
-			}
-		}
-		if overrideReturnArg := GetArg(event, "prog_override_return"); overrideReturnArg != nil {
-			if overrideReturn, isInt := overrideReturnArg.Value.(int32); isInt {
-				perfTypestr, err := parseBpfAttachHelperUsage(overrideReturn)
-				EmptyString(overrideReturnArg)
-				if err == nil {
-					overrideReturnArg.Value = perfTypestr
-				}
+				helpersArg.Type = "const char**"
+				helpersArg.Value = parsedHelpersList
 			}
 		}
 		if perfTypeArg := GetArg(event, "perf_type"); perfTypeArg != nil {
@@ -264,6 +257,23 @@ func ParseArgs(event *trace.Event) error {
 				if err == nil {
 					perfTypeArg.Value = perfTypestr
 				}
+			}
+		}
+	case SecurityBpfProg:
+		if progTypeArg := GetArg(event, "type"); progTypeArg != nil {
+			if progType, isInt := progTypeArg.Value.(int32); isInt {
+				progTypeArgument, err := helpers.ParseBPFProgType(uint64(progType))
+				ParseOrEmptyString(progTypeArg, progTypeArgument, err)
+			}
+		}
+		if helpersArg := GetArg(event, "helpers"); helpersArg != nil {
+			if helpersList, isUintSlice := helpersArg.Value.([]uint64); isUintSlice {
+				parsedHelpersList, err := parseBpfHelpersUsage(helpersList)
+				if err != nil {
+					return err
+				}
+				helpersArg.Type = "const char**"
+				helpersArg.Value = parsedHelpersList
 			}
 		}
 	}
@@ -281,7 +291,7 @@ func ParseArgsFDs(event *trace.Event, fdArgPathMap *bpf.BPFMap) error {
 			}
 			bs, err := fdArgPathMap.GetValue(unsafe.Pointer(fdArgTask))
 			if err != nil {
-				return logger.ErrorFunc(err)
+				return errfmt.WrapError(err)
 			}
 
 			fpath := string(bytes.Trim(bs, "\x00"))
@@ -313,17 +323,22 @@ func (arg CustomFunctionArgument) Value() uint64 {
 	return arg.val
 }
 
-func parseBpfAttachHelperUsage(helperArg int32) (string, error) {
-	switch helperArg {
-	case 0:
-		return "false", nil
-	case 1:
-		return "true", nil
-	case 2:
-		return "unknown", nil
-	default:
-		return "", logger.NewErrorf("unknown value got from bpf_attach event for helper usage arg")
+func parseBpfHelpersUsage(helpersList []uint64) ([]string, error) {
+
+	var usedHelpers []string
+
+	for i := 0; i < len(helpersList)*64; i++ {
+		if (helpersList[i/64] & (1 << (i % 64))) > 0 {
+			// helper number <i> is used. get its name from libbpfgo
+			bpfHelper, err := helpers.ParseBPFFunc(uint64(i))
+			if err != nil {
+				continue
+			}
+			usedHelpers = append(usedHelpers, bpfHelper.String())
+		}
 	}
+
+	return usedHelpers, nil
 }
 
 func parseBpfAttachPerfType(perfType int32) (string, error) {
@@ -339,6 +354,6 @@ func parseBpfAttachPerfType(perfType int32) (string, error) {
 	case 4:
 		return "uretprobe", nil
 	default:
-		return "", logger.NewErrorf("unknown perf_type got from bpf_attach event")
+		return "", errfmt.Errorf("unknown perf_type got from bpf_attach event")
 	}
 }

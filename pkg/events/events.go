@@ -1,11 +1,12 @@
 package events
 
 import (
-	"github.com/aquasecurity/tracee/pkg/ebpf/probes"
-	"github.com/aquasecurity/tracee/pkg/events/trigger"
-	"github.com/aquasecurity/tracee/pkg/logger"
-	"github.com/aquasecurity/tracee/types/trace"
 	"kernel.org/pub/linux/libs/security/libcap/cap"
+
+	"github.com/aquasecurity/tracee/pkg/ebpf/probes"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
+	"github.com/aquasecurity/tracee/pkg/events/trigger"
+	"github.com/aquasecurity/tracee/types/trace"
 )
 
 type dependencies struct {
@@ -63,6 +64,11 @@ const (
 	tailSchedProcessExecEventSubmit
 	tailVfsRead
 	tailVfsReadv
+	TailExecBinprm1
+	TailExecBinprm2
+	tailHiddenKernelModuleProc
+	tailHiddenKernelModuleKset
+	tailHiddenKernelModuleModTree
 	MaxTail
 )
 
@@ -118,11 +124,11 @@ type eventDefinitions struct {
 // Add adds an event to definitions
 func (e *eventDefinitions) Add(eventId ID, evt Event) error {
 	if _, ok := e.events[eventId]; ok {
-		return logger.NewErrorf("error event id already exist: %v", eventId)
+		return errfmt.Errorf("error event id already exist: %v", eventId)
 	}
 
 	if _, ok := e.GetID(evt.Name); ok {
-		return logger.NewErrorf("error event name already exist: %v", evt.Name)
+		return errfmt.Errorf("error event name already exist: %v", evt.Name)
 	}
 
 	e.events[eventId] = evt
@@ -130,13 +136,13 @@ func (e *eventDefinitions) Add(eventId ID, evt Event) error {
 	return nil
 }
 
-// Get gets the event without checking for Event existance
+// Get gets the event without checking for Event existence
 func (e *eventDefinitions) Get(eventId ID) Event {
 	evt := e.events[eventId]
 	return evt
 }
 
-// GetSafe gets the Event and also returns bool to check for existance
+// GetSafe gets the Event and also returns bool to check for existence
 func (e *eventDefinitions) GetSafe(eventId ID) (Event, bool) {
 	evt, ok := e.events[eventId]
 	return evt, ok
@@ -261,6 +267,10 @@ const (
 	VfsUtimes
 	DoTruncate
 	FileModification
+	InotifyWatch
+	SecurityBpfProg
+	ProcessExecuteFailed
+	HiddenKernelModuleSeeker
 	MaxCommonID
 )
 
@@ -287,6 +297,7 @@ const (
 	HookedSeqOps
 	SymbolsLoaded
 	SymbolsCollision
+	HiddenKernelModule
 	MaxUserSpace
 )
 
@@ -298,6 +309,7 @@ const (
 	CaptureMem
 	CapturePcap
 	CaptureNetPacket
+	CaptureBpf
 )
 
 // Signature events
@@ -5664,6 +5676,7 @@ var Definitions = eventDefinitions{
 				{Type: "const char*", Name: "container_id"},
 				{Type: "unsigned long", Name: "ctime"},
 				{Type: "const char*", Name: "container_image"},
+				{Type: "const char*", Name: "container_image_digest"},
 				{Type: "const char*", Name: "container_name"},
 				{Type: "const char*", Name: "pod_name"},
 				{Type: "const char*", Name: "pod_namespace"},
@@ -5692,6 +5705,7 @@ var Definitions = eventDefinitions{
 				{Type: "const char*", Name: "container_id"},
 				{Type: "unsigned long", Name: "ctime"},
 				{Type: "const char*", Name: "container_image"},
+				{Type: "const char*", Name: "container_image_digest"},
 				{Type: "const char*", Name: "container_name"},
 				{Type: "const char*", Name: "pod_name"},
 				{Type: "const char*", Name: "pod_namespace"},
@@ -5769,6 +5783,45 @@ var Definitions = eventDefinitions{
 			Params: []trace.ArgMeta{
 				{Type: "unsigned long[]", Name: "syscalls_addresses"},
 				{Type: "unsigned long", Name: trigger.ContextArgName},
+			},
+		},
+		HiddenKernelModule: {
+			ID32Bit: sys32undefined,
+			Name:    "hidden_kernel_module",
+			Dependencies: dependencies{
+				Events: []eventDependency{
+					{EventID: HiddenKernelModuleSeeker},
+				},
+			},
+			Sets: []string{},
+			Params: []trace.ArgMeta{
+				{Type: "const char*", Name: "address"},
+				{Type: "const char*", Name: "name"},
+			},
+		},
+		HiddenKernelModuleSeeker: {
+			ID32Bit:  sys32undefined,
+			Name:     "hidden_kernel_module_seeker",
+			Internal: true,
+			Probes: []probeDependency{
+				{Handle: probes.HiddenKernelModuleSeeker, Required: true},
+			},
+			Dependencies: dependencies{
+				KSymbols: &[]kSymbolDependency{
+					{Symbol: "modules", Required: true},
+					{Symbol: "module_kset", Required: true},
+					{Symbol: "mod_tree", Required: true},
+				},
+				TailCalls: []TailCall{
+					{MapName: "prog_array", MapIndexes: []uint32{tailHiddenKernelModuleProc}, ProgName: "lkm_seeker_proc_tail"},
+					{MapName: "prog_array", MapIndexes: []uint32{tailHiddenKernelModuleKset}, ProgName: "lkm_seeker_kset_tail"},
+					{MapName: "prog_array", MapIndexes: []uint32{tailHiddenKernelModuleModTree}, ProgName: "lkm_seeker_mod_tree_tail"},
+				},
+			},
+			Sets: []string{},
+			Params: []trace.ArgMeta{
+				{Type: "unsigned long", Name: "address"},
+				{Type: "bytes", Name: "name"},
 			},
 		},
 		HookedSyscalls: {
@@ -5947,6 +6000,19 @@ var Definitions = eventDefinitions{
 				},
 			},
 		},
+		CaptureBpf: {
+			ID32Bit:  sys32undefined,
+			Name:     "capture_bpf",
+			Internal: true,
+			Probes: []probeDependency{
+				{Handle: probes.SecurityBPF, Required: true},
+			},
+			Dependencies: dependencies{
+				TailCalls: []TailCall{
+					{MapName: "prog_array", MapIndexes: []uint32{tailSendBin}, ProgName: "send_bin"},
+				},
+			},
+		},
 		DoInitModule: {
 			ID32Bit: sys32undefined,
 			Name:    "do_init_module",
@@ -6108,7 +6174,7 @@ var Definitions = eventDefinitions{
 		BpfAttach: {
 			ID32Bit: sys32undefined,
 			Name:    "bpf_attach",
-			DocPath: "security_alerts/bpf_attach.md",
+			DocPath: "docs/events/builtin/extra/bpf_attach.md",
 			Probes: []probeDependency{
 				{Handle: probes.SecurityFileIoctl, Required: true},
 				{Handle: probes.SecurityBpfProg, Required: true},
@@ -6120,10 +6186,10 @@ var Definitions = eventDefinitions{
 			Params: []trace.ArgMeta{
 				{Type: "int", Name: "prog_type"},
 				{Type: "const char*", Name: "prog_name"},
+				{Type: "u32", Name: "prog_id"},
+				{Type: "unsigned long[]", Name: "prog_helpers"},
 				{Type: "const char*", Name: "perf_symbol"},
 				{Type: "u64", Name: "perf_addr"},
-				{Type: "int", Name: "prog_write_user"},
-				{Type: "int", Name: "prog_override_return"},
 				{Type: "int", Name: "perf_type"},
 			},
 		},
@@ -6245,6 +6311,69 @@ var Definitions = eventDefinitions{
 				{Handle: probes.FileUpdateTimeRet, Required: true},
 				{Handle: probes.FileModified, Required: false},    // not required because doesn't ...
 				{Handle: probes.FileModifiedRet, Required: false}, // ... exist in kernels < 5.3
+			},
+		},
+		InotifyWatch: {
+			ID32Bit: sys32undefined,
+			Name:    "inotify_watch",
+			Probes: []probeDependency{
+				{Handle: probes.InotifyFindInode, Required: true},
+				{Handle: probes.InotifyFindInodeRet, Required: true},
+			},
+			Sets: []string{},
+			Params: []trace.ArgMeta{
+				{Type: "const char*", Name: "pathname"},
+				{Type: "unsigned long", Name: "inode"},
+				{Type: "dev_t", Name: "dev"},
+			},
+		},
+		SecurityBpfProg: {
+			ID32Bit: sys32undefined,
+			Name:    "security_bpf_prog",
+			DocPath: "docs/events/builtin/extra/security_bpf_prog.md",
+			Probes: []probeDependency{
+				{Handle: probes.SecurityBpfProg, Required: true},
+				{Handle: probes.BpfCheck, Required: true},
+				{Handle: probes.CheckHelperCall, Required: false},
+				{Handle: probes.CheckMapFuncCompatibility, Required: false},
+			},
+			Sets: []string{},
+			Params: []trace.ArgMeta{
+				{Type: "int", Name: "type"},
+				{Type: "const char*", Name: "name"},
+				{Type: "unsigned long[]", Name: "helpers"},
+				{Type: "u32", Name: "id"},
+				{Type: "bool", Name: "load"},
+			},
+		},
+		ProcessExecuteFailed: {
+			ID32Bit: sys32undefined,
+			Name:    "process_execute_failed",
+			Sets:    []string{"proc"},
+			Dependencies: dependencies{
+				TailCalls: []TailCall{
+					{MapName: "sys_enter_init_tail", MapIndexes: []uint32{uint32(Execve), uint32(Execveat)}, ProgName: "sys_enter_init"},
+					{MapName: "prog_array", MapIndexes: []uint32{TailExecBinprm1}, ProgName: "trace_ret_exec_binprm1"},
+					{MapName: "prog_array", MapIndexes: []uint32{TailExecBinprm2}, ProgName: "trace_ret_exec_binprm2"},
+				},
+			},
+			Params: []trace.ArgMeta{
+				{Type: "const char*", Name: "path"},
+				{Type: "const char*", Name: "binary.path"},
+				{Type: "dev_t", Name: "binary.device_id"},
+				{Type: "unsigned long", Name: "binary.inode_number"},
+				{Type: "unsigned long", Name: "binary.ctime"},
+				{Type: "umode_t", Name: "binary.inode_mode"},
+				{Type: "const char*", Name: "interpreter_path"},
+				{Type: "umode_t", Name: "stdin_type"},
+				{Type: "char*", Name: "stdin_path"},
+				{Type: "int", Name: "kernel_invoked"},
+				{Type: "const char*const*", Name: "binary.arguments"},
+				{Type: "const char*const*", Name: "environment"},
+			},
+			Probes: []probeDependency{
+				{Handle: probes.ExecBinprm, Required: true},
+				{Handle: probes.ExecBinprmRet, Required: true},
 			},
 		},
 		//

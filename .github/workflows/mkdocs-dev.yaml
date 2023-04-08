@@ -1,9 +1,12 @@
+#
+# On document changes and on demand: Deploy the dev documentatio
+#
 name: Deploy the dev documentation
 on:
   workflow_dispatch: {}
   push:
     paths:
-      - 'docs/**'
+      - "docs/**"
       - mkdocs.yml
     branches:
       - main
@@ -13,7 +16,7 @@ jobs:
     runs-on: ubuntu-18.04
     steps:
       - name: Checkout main
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
           persist-credentials: true

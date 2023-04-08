@@ -1,15 +1,16 @@
 package ebpf
 
 import (
-	gocontext "context"
+	"context"
 	"encoding/binary"
 	"fmt"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 
 	"github.com/aquasecurity/tracee/pkg/events"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 )
 
 //
@@ -28,7 +29,10 @@ const (
 	familyIpv6
 )
 
-func (t *Tracee) processNetCaptureEvents(ctx gocontext.Context) {
+func (t *Tracee) processNetCaptureEvents(ctx context.Context) {
+	logger.Debugw("Starting processNetCaptureEvents go routine")
+	defer logger.Debugw("Stopped processNetCaptureEvents go routine")
+
 	var errChanList []<-chan error
 
 	// source pipeline stage (re-used from regular pipeline)
@@ -40,10 +44,12 @@ func (t *Tracee) processNetCaptureEvents(ctx gocontext.Context) {
 	errChanList = append(errChanList, errChan)
 
 	// pipeline started, wait for completion.
-	t.WaitForPipeline(errChanList...)
+	if err := t.WaitForPipeline(errChanList...); err != nil {
+		logger.Errorw("Pipeline", "error", err)
+	}
 }
 
-func (t *Tracee) processNetCapEvents(ctx gocontext.Context, in <-chan *trace.Event) <-chan error {
+func (t *Tracee) processNetCapEvents(ctx context.Context, in <-chan *trace.Event) <-chan error {
 	errc := make(chan error, 1)
 
 	go func() {
@@ -53,13 +59,15 @@ func (t *Tracee) processNetCapEvents(ctx gocontext.Context, in <-chan *trace.Eve
 			select {
 			case event := <-in:
 				t.processNetCapEvent(event)
-				t.stats.NetCapCount.Increment()
+				_ = t.stats.NetCapCount.Increment()
 
 			case lost := <-t.lostNetCapChannel:
 				if lost > 0 {
 					// https://github.com/aquasecurity/libbpfgo/issues/122
-					t.stats.LostNtCapCount.Increment(lost)
-					logger.Warn(fmt.Sprintf("lost %d network capture events", lost))
+					if err := t.stats.LostNtCapCount.Increment(lost); err != nil {
+						logger.Errorw("Incrementing lost network events count", "error", err)
+					}
+					logger.Warnw(fmt.Sprintf("Lost %d network capture events", lost))
 				}
 
 			case <-ctx.Done():
@@ -89,16 +97,16 @@ func (t *Tracee) processNetCapEvent(event *trace.Event) {
 
 		payloadArg := events.GetArg(event, "payload")
 		if payloadArg == nil {
-			logger.Debug("network capture: no payload packet")
+			logger.Debugw("Network capture: no payload packet")
 			return
 		}
 		if payload, ok = payloadArg.Value.([]byte); !ok {
-			logger.Debug("network capture: non []byte argument")
+			logger.Debugw("Network capture: non []byte argument")
 			return
 		}
 		payloadSize := len(payload)
 		if payloadSize < 1 {
-			logger.Debug("network capture: empty payload")
+			logger.Debugw("Network capture: empty payload")
 			return
 		}
 
@@ -109,7 +117,7 @@ func (t *Tracee) processNetCapEvent(event *trace.Event) {
 		} else if event.ReturnValue&familyIpv6 == familyIpv6 {
 			layerType = layers.LayerTypeIPv6
 		} else {
-			logger.Debug("unsupported layer3 protocol")
+			logger.Debugw("Unsupported layer3 protocol")
 		}
 
 		// parse packet
@@ -120,7 +128,7 @@ func (t *Tracee) processNetCapEvent(event *trace.Event) {
 			gopacket.Default,
 		)
 		if packet == nil {
-			logger.Debug("could not parse packet")
+			logger.Debugw("Could not parse packet")
 			return
 		}
 
@@ -294,7 +302,7 @@ func (t *Tracee) processNetCapEvent(event *trace.Event) {
 
 		// This might be too much, but keep it here for now
 
-		// logger.Debug(
+		// logger.Debugw(
 		// 	"capturing network",
 		// 	"command", event.ProcessName,
 		// 	"srcIP", srcIP,
@@ -305,10 +313,10 @@ func (t *Tracee) processNetCapEvent(event *trace.Event) {
 
 		err := t.netCapturePcap.Write(event, payload)
 		if err != nil {
-			logger.Error("could not write pcap data", "err", err)
+			logger.Errorw("Could not write pcap data", "err", err)
 		}
 
 	default:
-		logger.Debug("network capture: wrong net capture event type")
+		logger.Debugw("Network capture: wrong net capture event type")
 	}
 }

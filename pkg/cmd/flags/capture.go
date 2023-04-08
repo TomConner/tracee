@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tracee "github.com/aquasecurity/tracee/pkg/ebpf"
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 )
 
@@ -18,6 +19,7 @@ Possible options:
 [artifact:]write[=/path/prefix*]              capture written files. A filter can be given to only capture file writes whose path starts with some prefix (up to 50 characters). Up to 3 filters can be given.
 [artifact:]exec                               capture executed files.
 [artifact:]module                             capture loaded kernel modules.
+[artifact:]bpf                                capture loaded BPF programs bytecode.
 [artifact:]mem                                capture memory regions that had write+execute (w+x) protection, and then changed to execute (x) only.
 [artifact:]network                            capture network traffic. Only TCP/UDP/ICMP protocols are currently supported.
 
@@ -94,7 +96,7 @@ func PrepareCapture(captureSlice []string) (tracee.CaptureConfig, error) {
 			capture.FileWrite = true
 			pathPrefix := strings.TrimSuffix(strings.TrimPrefix(cap, "write="), "*")
 			if len(pathPrefix) == 0 {
-				return tracee.CaptureConfig{}, logger.NewErrorf("capture write filter cannot be empty")
+				return tracee.CaptureConfig{}, errfmt.Errorf("capture write filter cannot be empty")
 			}
 			filterFileWrite = append(filterFileWrite, pathPrefix)
 		} else if cap == "exec" {
@@ -103,6 +105,8 @@ func PrepareCapture(captureSlice []string) (tracee.CaptureConfig, error) {
 			capture.Module = true
 		} else if cap == "mem" {
 			capture.Mem = true
+		} else if cap == "bpf" {
+			capture.Bpf = true
 		} else if cap == "network" || cap == "net" || cap == "pcap" {
 			// default capture mode: a single pcap file with all traffic
 			capture.Net.CaptureSingle = true
@@ -155,10 +159,10 @@ func PrepareCapture(captureSlice []string) (tracee.CaptureConfig, error) {
 				context = strings.TrimSuffix(context, "b")
 				amount, err = strconv.ParseUint(context, 10, 64)
 			} else {
-				return tracee.CaptureConfig{}, logger.NewErrorf("could not parse pcap snaplen: missing b or kb ?")
+				return tracee.CaptureConfig{}, errfmt.Errorf("could not parse pcap snaplen: missing b or kb ?")
 			}
 			if err != nil {
-				return tracee.CaptureConfig{}, logger.NewErrorf("could not parse pcap snaplen: %v", err)
+				return tracee.CaptureConfig{}, errfmt.Errorf("could not parse pcap snaplen: %v", err)
 			}
 			if amount >= (1 << 16) {
 				amount = (1 << 16) - 1
@@ -169,17 +173,21 @@ func PrepareCapture(captureSlice []string) (tracee.CaptureConfig, error) {
 		} else if strings.HasPrefix(cap, "dir:") {
 			outDir = strings.TrimPrefix(cap, "dir:")
 			if len(outDir) == 0 {
-				return tracee.CaptureConfig{}, logger.NewErrorf("capture output dir cannot be empty")
+				return tracee.CaptureConfig{}, errfmt.Errorf("capture output dir cannot be empty")
 			}
 		} else {
-			return tracee.CaptureConfig{}, logger.NewErrorf("invalid capture option specified, use '--capture help' for more info")
+			return tracee.CaptureConfig{}, errfmt.Errorf("invalid capture option specified, use '--capture help' for more info")
 		}
 	}
 	capture.FilterFileWrite = filterFileWrite
 
 	capture.OutputPath = filepath.Join(outDir, "out")
-	if clearDir {
-		os.RemoveAll(capture.OutputPath)
+	if !clearDir {
+		return capture, nil
+	}
+
+	if err := os.RemoveAll(capture.OutputPath); err != nil {
+		logger.Warnw("Removing all", "error", err)
 	}
 
 	return capture, nil

@@ -6,13 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/aquasecurity/tracee/pkg/signatures/benchmark/signature/golang"
 	"github.com/aquasecurity/tracee/pkg/signatures/benchmark/signature/rego"
 	"github.com/aquasecurity/tracee/pkg/signatures/benchmark/signature/wasm"
 	"github.com/aquasecurity/tracee/pkg/signatures/engine"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/protocol"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -42,7 +43,7 @@ func BenchmarkOnEventWithCodeInjectionSignature(b *testing.B) {
 		b.Run(bc.name, func(b *testing.B) {
 			s, err := bc.sigFunc()
 			require.NoError(b, err, bc.name)
-			require.NoError(b, s.Init(ignoreFinding), bc.name)
+			require.NoError(b, s.Init(detect.SignatureContext{Callback: ignoreFinding}), bc.name)
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

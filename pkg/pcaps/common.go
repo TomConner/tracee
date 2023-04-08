@@ -6,11 +6,13 @@ import (
 	"os"
 	"strings"
 
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcapgo"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/pkg/utils"
 	"github.com/aquasecurity/tracee/types/trace"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcapgo"
 )
 
 var outputDirectory *os.File
@@ -60,12 +62,12 @@ func getItemIndexFromEvent(event *trace.Event, itemType PcapType) interface{} {
 	case Process:
 		return event.HostThreadID
 	case Container:
-		return event.ContainerID
+		return event.Container.ID
 	case Command:
 		// index by using container_id and comm (to avoid having all
 		// captured packets in command/host/XXX, as it would occur if
 		// indexing by container_id only).
-		ret := fmt.Sprintf("%s:%s", event.ContainerID, event.ProcessName)
+		ret := fmt.Sprintf("%s:%s", event.Container.ID, event.ProcessName)
 		return ret
 	}
 
@@ -77,12 +79,12 @@ func getItemIndexFromEvent(event *trace.Event, itemType PcapType) interface{} {
 func getPcapFileName(event *trace.Event, pcapType PcapType) (string, error) {
 	var err error
 
-	contID := getContainerID(event.ContainerID)
+	contID := getContainerID(event.Container.ID)
 
 	// create needed dirs
 	err = mkdirForPcapType(outputDirectory, contID, pcapType)
 	if err != nil {
-		return "", logger.ErrorFunc(err)
+		return "", errfmt.WrapError(err)
 	}
 
 	// return filename in format according to pcap type
@@ -142,22 +144,43 @@ func mkdirForPcapType(o *os.File, c string, t PcapType) error {
 
 	s := "pcap"
 
-	utils.MkdirAtExist(o, s, os.ModePerm)
+	e = utils.MkdirAtExist(o, s, os.ModePerm)
+	if e != nil {
+		return errfmt.WrapError(e)
+	}
 
 	switch t {
 	case Single:
 		e = utils.MkdirAtExist(o, pcapSingleDir, os.ModePerm)
+		if e != nil {
+			return errfmt.WrapError(e)
+		}
 	case Process:
-		utils.MkdirAtExist(o, pcapProcDir, os.ModePerm)
+		e = utils.MkdirAtExist(o, pcapProcDir, os.ModePerm)
+		if e != nil {
+			return errfmt.WrapError(e)
+		}
 		e = utils.MkdirAtExist(o, pcapProcDir+c, os.ModePerm)
+		if e != nil {
+			return errfmt.WrapError(e)
+		}
 	case Container:
-		utils.MkdirAtExist(o, pcapContDir, os.ModePerm)
+		e = utils.MkdirAtExist(o, pcapContDir, os.ModePerm)
+		if e != nil {
+			return errfmt.WrapError(e)
+		}
 	case Command:
-		utils.MkdirAtExist(o, pcapCommDir, os.ModePerm)
+		e = utils.MkdirAtExist(o, pcapCommDir, os.ModePerm)
+		if e != nil {
+			return errfmt.WrapError(e)
+		}
 		e = utils.MkdirAtExist(o, pcapCommDir+c, os.ModePerm)
+		if e != nil {
+			return errfmt.WrapError(e)
+		}
 	}
 
-	return logger.ErrorFunc(e)
+	return nil
 }
 
 // getPcapFileAndWriter returns a file descriptor and and its associated pcap
@@ -169,7 +192,7 @@ func getPcapFileAndWriter(event *trace.Event, t PcapType) (
 ) {
 	pcapFilePath, err := getPcapFileName(event, t)
 	if err != nil {
-		return nil, nil, logger.ErrorFunc(err)
+		return nil, nil, errfmt.WrapError(err)
 	}
 	file, err := utils.OpenAt(
 		outputDirectory,
@@ -178,10 +201,10 @@ func getPcapFileAndWriter(event *trace.Event, t PcapType) (
 		0644,
 	)
 	if err != nil {
-		return nil, nil, logger.ErrorFunc(err)
+		return nil, nil, errfmt.WrapError(err)
 	}
 
-	logger.Debug("pcap file (re)opened", "filename", pcapFilePath)
+	logger.Debugw("pcap file (re)opened", "filename", pcapFilePath)
 
 	writer, err := pcapgo.NewNgWriterInterface(
 		file,
@@ -189,11 +212,11 @@ func getPcapFileAndWriter(event *trace.Event, t PcapType) (
 		pcapgo.DefaultNgWriterOptions,
 	)
 	if err != nil {
-		return nil, nil, logger.ErrorFunc(err)
+		return nil, nil, errfmt.WrapError(err)
 	}
 	err = writer.Flush()
 	if err != nil {
-		return nil, nil, logger.ErrorFunc(err)
+		return nil, nil, errfmt.WrapError(err)
 	}
 
 	return file, writer, nil

@@ -6,33 +6,15 @@ import (
 	"os/signal"
 	"syscall"
 
+	cli "github.com/urfave/cli/v2"
+
 	"github.com/aquasecurity/tracee/pkg/cmd"
 	"github.com/aquasecurity/tracee/pkg/cmd/flags"
 	"github.com/aquasecurity/tracee/pkg/cmd/flags/server"
 	"github.com/aquasecurity/tracee/pkg/cmd/initialize"
 	"github.com/aquasecurity/tracee/pkg/cmd/urfave"
 	"github.com/aquasecurity/tracee/pkg/logger"
-
-	cli "github.com/urfave/cli/v2"
 )
-
-func init() {
-	// Avoiding to override package-level logger
-	// when it's already set by logger environment variables
-	if !logger.IsSetFromEnv() {
-		// Logger Setup
-		logger.Init(
-			&logger.LoggerConfig{
-				Writer:    os.Stderr,
-				Level:     logger.InfoLevel,
-				Encoder:   logger.NewJSONEncoder(logger.NewProductionConfig().EncoderConfig),
-				Aggregate: false,
-			},
-		)
-	}
-
-	initialize.SetLibbpfgoCallbacks()
-}
 
 var version string
 
@@ -47,12 +29,16 @@ func main() {
 				return cli.ShowAppHelp(c) // no args, only flags supported
 			}
 
+			// Logger Setup
+			logger.Init(logger.NewDefaultLoggingConfig())
+
 			flags.PrintAndExitIfHelp(c, false)
 
 			if c.Bool("list") {
 				cmd.PrintEventList(false) // list events
 				return nil
 			}
+			initialize.SetLibbpfgoCallbacks()
 
 			runner, err := urfave.GetTraceeRunner(c, version, false)
 			if err != nil {
@@ -70,7 +56,7 @@ func main() {
 				Name:    "list",
 				Aliases: []string{"l"},
 				Value:   false,
-				Usage:   "list tracable events",
+				Usage:   "list traceable events",
 			},
 			&cli.StringSliceFlag{
 				Name:    "filter",
@@ -110,12 +96,12 @@ func main() {
 			&cli.IntFlag{
 				Name:    "perf-buffer-size",
 				Aliases: []string{"b"},
-				Value:   1024, // 4 MB of contigous pages
+				Value:   1024, // 4 MB of contiguous pages
 				Usage:   "size, in pages, of the internal perf ring buffer used to submit events from the kernel",
 			},
 			&cli.IntFlag{
 				Name:  "blob-perf-buffer-size",
-				Value: 1024, // 4 MB of contigous pages
+				Value: 1024, // 4 MB of contiguous pages
 				Usage: "size, in pages, of the internal perf ring buffer used to send blobs from the kernel",
 			},
 			&cli.StringFlag{
@@ -138,6 +124,11 @@ func main() {
 				Usage: "enable pprof endpoints",
 				Value: false,
 			},
+			&cli.BoolFlag{
+				Name:  server.PyroscopeAgentFlag,
+				Usage: "enable pyroscope agent",
+				Value: false,
+			},
 			&cli.StringFlag{
 				Name:  server.ListenEndpointFlag,
 				Usage: "listening address of the metrics endpoint server",
@@ -157,6 +148,6 @@ func main() {
 
 	err := app.Run(os.Args)
 	if err != nil {
-		logger.Fatal("app", "error", err)
+		logger.Fatalw("App", "error", err)
 	}
 }

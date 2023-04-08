@@ -288,30 +288,40 @@ static __always_inline u64 should_trace(program_data_t *p)
         p->task_info->recompute_scope = false;
     }
 
-    p->event->context.matched_scopes = p->task_info->matched_scopes;
+    p->event->context.matched_policies = p->task_info->matched_scopes;
 
     return p->task_info->matched_scopes;
 }
 
-static __always_inline u64 should_submit(u32 event_id, event_context_t *ctx)
+static __always_inline u64 should_submit(u32 event_id, event_data_t *event)
 {
-    // use a map only with no submit cache from config.
-    // since this function is only ever called after a should_trace
-    // and in the context of a submit program/tail_call, any preemptive
-    // cache calculation before checking the map will 99% of times be
-    // redundant.
-    // a probe/tail call attach almost always implies at least one
-    // scope requires the event to be submitted.
-    u64 *event_scopes = bpf_map_lookup_elem(&events_map, &event_id);
-    // if scopes not set, don't submit
-    if (event_scopes == NULL) {
+    event_config_t *event_config = bpf_map_lookup_elem(&events_map, &event_id);
+    // if event config not set, don't submit
+    if (event_config == NULL)
         return 0;
-    }
 
-    // align with previously matched scopes
-    ctx->matched_scopes &= *event_scopes;
+    // align with previously matched policies
+    event->context.matched_policies &= event_config->submit_for_policies;
 
-    return ctx->matched_scopes;
+    // save event's param types
+    event->param_types = event_config->param_types;
+
+    return event->context.matched_policies;
+}
+
+// network events don't use event_data_t type, but only event_context_t so we ignore
+// param types used by the event
+static __always_inline u64 should_submit_by_ctx(u32 event_id, event_context_t *ctx)
+{
+    event_config_t *event_config = bpf_map_lookup_elem(&events_map, &event_id);
+    // if event config not set, don't submit
+    if (event_config == NULL)
+        return 0;
+
+    // align with previously matched policies
+    ctx->matched_policies &= event_config->submit_for_policies;
+
+    return ctx->matched_policies;
 }
 
 #endif

@@ -1,9 +1,11 @@
 package pcaps
 
 import (
+	lru "github.com/hashicorp/golang-lru"
+
+	"github.com/aquasecurity/tracee/pkg/errfmt"
 	"github.com/aquasecurity/tracee/pkg/logger"
 	"github.com/aquasecurity/tracee/types/trace"
-	lru "github.com/hashicorp/golang-lru"
 )
 
 // PcapCache is an intermediate LRU cache in between Pcap and Pcaps
@@ -21,18 +23,22 @@ func newPcapCache(itemType PcapType) (*PcapCache, error) {
 			// sync and close pcap file on evict
 			item, ok := value.(*Pcap)
 			if !ok {
-				logger.Debug("could not evict a pcap cache item")
+				logger.Debugw("Could not evict a pcap cache item")
 				return
 			}
 
-			item.pcapWriter.Flush()
-			item.pcapFile.Close()
+			if err := item.pcapWriter.Flush(); err != nil {
+				logger.Errorw("Flushing pcap", "error", err)
+			}
+			if err := item.pcapFile.Close(); err != nil {
+				logger.Errorw("Closing file", "error", err)
+			}
 		})
 
 	return &PcapCache{
 		itemCache: cache,
 		itemType:  itemType,
-	}, logger.ErrorFunc(err)
+	}, errfmt.WrapError(err)
 }
 
 func (p *PcapCache) get(event *trace.Event) (*Pcap, error) {
@@ -45,7 +51,7 @@ func (p *PcapCache) get(event *trace.Event) (*Pcap, error) {
 		// create an item and return it
 		new, err := NewPcap(event, p.itemType)
 		if err != nil {
-			return nil, logger.ErrorFunc(err)
+			return nil, errfmt.WrapError(err)
 		}
 		p.itemCache.Add(getItemIndexFromEvent(event, p.itemType), new)
 		item = new
@@ -53,7 +59,7 @@ func (p *PcapCache) get(event *trace.Event) (*Pcap, error) {
 		// return the cached item
 		item, ok = i.(*Pcap)
 		if !ok {
-			return nil, logger.NewErrorf("unexpected item type in pcap cache")
+			return nil, errfmt.Errorf("unexpected item type in pcap cache")
 		}
 	}
 
@@ -65,9 +71,11 @@ func (p *PcapCache) destroy() error {
 	for _, k := range p.itemCache.Keys() {
 		switch key := k.(type) {
 		case *Pcap:
-			key.close()
+			if err := key.close(); err != nil {
+				logger.Errorw("Closing file", "error", err)
+			}
 		default:
-			return logger.NewErrorf("wrong key type in pcap cache")
+			return errfmt.Errorf("wrong key type in pcap cache")
 		}
 	}
 	p.itemCache.Purge()

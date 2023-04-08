@@ -3,11 +3,12 @@ package celsig
 import (
 	"fmt"
 
+	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
+
 	"github.com/aquasecurity/tracee/pkg/signatures/celsig/wrapper"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/protocol"
-	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/types"
 )
 
 type signature struct {
@@ -49,8 +50,8 @@ func (s *signature) GetSelectedEvents() ([]detect.SignatureEventSelector, error)
 	return s.selectedEvents, nil
 }
 
-func (s *signature) Init(cb detect.SignatureHandler) error {
-	s.cb = cb
+func (s *signature) Init(ctx detect.SignatureContext) error {
+	s.cb = ctx.Callback
 	return nil
 }
 

@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/aquasecurity/tracee/pkg/logger"
-
 	"github.com/aquasecurity/tracee/pkg/signatures/metrics"
 	"github.com/aquasecurity/tracee/types/detect"
 	"github.com/aquasecurity/tracee/types/protocol"
@@ -65,7 +64,7 @@ func NewEngine(config Config, sources EventSources, output chan detect.Finding) 
 	for _, sig := range config.Signatures {
 		_, err := engine.loadSignature(sig)
 		if err != nil {
-			logger.Error("loading signature: " + err.Error())
+			logger.Errorw("Loading signature: " + err.Error())
 		}
 	}
 	return &engine, nil
@@ -79,7 +78,7 @@ func StartPipeline(ctx context.Context, cfg Config, input chan protocol.Event) <
 	source := EventSources{Tracee: input}
 	engine, err := NewEngine(cfg, source, output)
 	if err != nil {
-		logger.Fatal("error creating engine: " + err.Error())
+		logger.Fatalw("Error creating engine: " + err.Error())
 	}
 
 	go func() {
@@ -96,7 +95,7 @@ func signatureStart(signature detect.Signature, c chan protocol.Event, wg *sync.
 	for e := range c {
 		if err := signature.OnEvent(e); err != nil {
 			meta, _ := signature.GetMetadata()
-			logger.Error("handling event by signature " + meta.Name + ": " + err.Error())
+			logger.Errorw("Handling event by signature " + meta.Name + ": " + err.Error())
 		}
 	}
 	wg.Done()
@@ -129,7 +128,7 @@ func (engine *Engine) unloadAllSignatures() {
 
 // matchHandler is a function that runs when a signature is matched
 func (engine *Engine) matchHandler(res detect.Finding) {
-	engine.stats.Detections.Increment()
+	_ = engine.stats.Detections.Increment()
 	engine.output <- res
 }
 
@@ -155,7 +154,7 @@ func (engine *Engine) consumeSources(ctx context.Context) {
 				for sig := range engine.signatures {
 					se, err := sig.GetSelectedEvents()
 					if err != nil {
-						logger.Error("getting selected events: " + err.Error())
+						logger.Errorw("Getting selected events: " + err.Error())
 						continue
 					}
 					for _, sel := range se {
@@ -178,7 +177,7 @@ func (engine *Engine) consumeSources(ctx context.Context) {
 					Source: event.Headers.Selector.Source,
 				}
 				source := signatureSelector.Source
-				engine.stats.Events.Increment()
+				_ = engine.stats.Events.Increment()
 
 				//Check the selector for every case and partial case
 
@@ -246,7 +245,7 @@ func (engine *Engine) loadSignature(signature detect.Signature) (string, error) 
 		return "", fmt.Errorf("failed to store signature: signature \"%s\" already loaded", metadata.Name)
 	}
 	engine.signaturesMutex.RUnlock()
-	if err := signature.Init(engine.matchHandler); err != nil {
+	if err := signature.Init(detect.SignatureContext{Callback: engine.matchHandler, Logger: logger.Current()}); err != nil {
 		//failed to initialize
 		return "", fmt.Errorf("error initializing signature %s: %w", metadata.Name, err)
 	}
@@ -264,7 +263,7 @@ func (engine *Engine) loadSignature(signature detect.Signature) (string, error) 
 			selectedEvent.Origin = ALL_EVENT_ORIGINS
 		}
 		if selectedEvent.Source == "" {
-			logger.Error("signature " + metadata.Name + " doesn't declare an input source")
+			logger.Errorw("Signature " + metadata.Name + " doesn't declare an input source")
 		} else {
 			engine.signaturesMutex.Lock()
 			engine.signaturesIndex[selectedEvent] = append(engine.signaturesIndex[selectedEvent], signature)
@@ -272,7 +271,7 @@ func (engine *Engine) loadSignature(signature detect.Signature) (string, error) 
 		}
 	}
 
-	engine.stats.Signatures.Increment()
+	_ = engine.stats.Signatures.Increment()
 	return metadata.ID, nil
 }
 
@@ -301,7 +300,9 @@ func (engine *Engine) UnloadSignature(signatureId string) error {
 	c, ok := engine.signatures[signature]
 	if ok {
 		delete(engine.signatures, signature)
-		defer engine.stats.Signatures.Decrement()
+		defer func() {
+			_ = engine.stats.Signatures.Decrement()
+		}()
 		defer signature.Close()
 		defer close(c)
 	}

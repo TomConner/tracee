@@ -85,3 +85,7 @@ signatures:
 #            name: ptrace
 #        expression: |-
 #          input.eventName == 'ptrace' && input.stringArg('request') == 'PTRACE_TRACEME'
+
+# replace with target nodes' kernel release, if incorrect, the result will be
+# `KConfig: could not check enabled kconfig features","error":"could not read /boot/config-${kernelVersion}`
+kernelRelease: 6.0.0-0.deb11.6-amd64
